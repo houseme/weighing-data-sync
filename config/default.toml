@@ -1,0 +1,33 @@
+[api]
+endpoint = "https://api.xmb.xyz/weighing-data-sync/put"
+timeout_seconds = 30
+
+[database]
+url = "sqlite://data/weighing_sync.db"
+max_connections = 5
+
+[server]
+enabled = false
+bind = "0.0.0.0:8080"
+route = "/weighing-data-sync/put"
+max_body_bytes = 16777216
+
+[sqlserver]
+host = "192.168.10.251"
+port = 1433
+database = "yunfu"
+username = "sa"
+password = "yusilong"
+table = "tbl_weightInfo"
+trust_cert = true
+encryption = "off"
+mark_uploaded = true
+
+[sync]
+source = "sqlserver"
+batch_size = 100
+cron = "0 */5 * * * *"
+sync_on_start = true
+retry_initial_delay_ms = 1000
+retry_max_delay_ms = 60000
+retry_max_elapsed_seconds = 300

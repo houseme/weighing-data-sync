@@ -1,0 +1,85 @@
+[package]
+name = "weighing-data-sync"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Reliable weighing-data synchronization daemon for local SQLite cache and cloud upload."
+authors = ["Anhui Shangheng Technology Co., Ltd."]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = true }
+backoff = { version = "0.4", features = ["tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
+dotenvy = "0.15"
+flate2 = { version = "1", optional = true }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "gzip",
+    "rustls",
+] }
+rust_decimal = "1"
+sea-orm = { version = "2.0.0-rc.43", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "with-chrono",
+    "with-json",
+    "with-rust_decimal",
+    "with-uuid",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tiberius = { version = "0.12", default-features = false, features = [
+    "chrono",
+    "rust_decimal",
+    "rustls",
+    "tds73",
+    "tokio",
+] }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "time",
+] }
+tokio-cron-scheduler = { version = "0.15", optional = true }
+tokio-tungstenite = { version = "0.30", optional = true }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uom = { version = "0.38", default-features = false, features = ["f64", "si", "std"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { version = "0.8", optional = true }
+winreg = { version = "0.56", optional = true }
+
+[dev-dependencies]
+mockito = "1"
+pretty_assertions = "1.4"
+tokio-test = "0.4"
+
+[features]
+default = ["sqlite", "http", "cron"]
+compression = ["dep:flate2"]
+cron = ["dep:tokio-cron-scheduler"]
+http = []
+sqlite = []
+websocket = ["dep:tokio-tungstenite"]
+windows = ["dep:windows-service", "dep:winreg"]
+
+[[bin]]
+name = "sync-daemon"
+path = "src/main.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
