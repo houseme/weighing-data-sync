@@ -33,7 +33,6 @@ sea-orm = { version = "2.0.0", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 tiberius = { version = "0.12", default-features = false, features = [
     "chrono",
     "rust_decimal",
@@ -60,11 +59,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [target.'cfg(windows)'.dependencies]
 windows-service = { version = "0.8", optional = true }
 winreg = { version = "0.56", optional = true }
-
-[dev-dependencies]
-mockito = "1"
-pretty_assertions = "1.4"
-tokio-test = "0.4"
 
 [features]
 default = ["sqlite", "http", "cron"]

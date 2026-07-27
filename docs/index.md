@@ -59,7 +59,10 @@ weighing-data-sync/
 ├── config/
 │   └── default.toml
 ├── docs/
-│   └── index.md
+│   ├── index.md
+│   ├── mysql_sync_schema.sql
+│   ├── sync_field_mapping.md
+│   └── sync_structs.rs
 └── src/
     ├── lib.rs
     ├── main.rs
@@ -125,6 +128,9 @@ weighing-data-sync/
 - `src/sync/sqlserver_engine.rs`：SQL Server 同步引擎，批量读取 `tbl_weightInfo`，上报 JSON，2xx 成功后按响应或整批标记已上传。
 - `src/windows/autostart.rs`：Windows 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入、删除、查询。
 - `src/windows/service.rs`：Windows 服务安装/卸载入口；非 Windows 平台返回明确错误。
+- `docs/sync_structs.rs`：完整同步 DTO 结构体，覆盖 `tbl_weightInfo`、`tbl_weightPhoto` 和本地缓存表。
+- `docs/mysql_sync_schema.sql`：高性能 MySQL 建表、索引、批量 upsert 和待同步扫描 SQL。
+- `docs/sync_field_mapping.md`：所有结构体字段的 JSON/Rust/MySQL 映射与同步处理规则。
 
 ### 4.1 配置示例
 
