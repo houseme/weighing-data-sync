@@ -60,6 +60,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 windows-service = { version = "0.8", optional = true }
 winreg = { version = "0.56", optional = true }
 
+[dev-dependencies]
+pretty_assertions = "1"
+
 [features]
 default = ["sqlite", "http", "cron"]
 compression = ["dep:flate2"]
