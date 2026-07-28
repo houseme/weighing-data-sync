@@ -2,4 +2,14 @@
 /data/
 /.env
 /.env.*
+# Keep the shipped config template under version control (placeholders only).
 !/config/default.toml
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.iml
+
+# Local runtime databases
+*.db
+*.db-*
