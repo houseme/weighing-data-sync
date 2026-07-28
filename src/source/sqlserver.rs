@@ -2,7 +2,7 @@ use anyhow::{Context, bail};
 use chrono::NaiveDateTime;
 use rust_decimal::Decimal;
 use serde_json::{Map, Number, Value};
-use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, Row};
+use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, Row, ToSql};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tracing::info;
@@ -10,6 +10,9 @@ use tracing::info;
 use crate::config::SqlServerConfig;
 
 type TdsClient = Client<Compat<TcpStream>>;
+
+/// TDS allows at most 2100 parameters per statement; chunk well below that.
+const MARK_UPLOAD_CHUNK_SIZE: usize = 1000;
 
 const WEIGHT_INFO_COLUMNS: &[&str] = &[
     "serialNo",
@@ -80,35 +83,47 @@ const WEIGHT_INFO_COLUMNS: &[&str] = &[
     "del_flag",
 ];
 
+/// One pending weighing row read from SQL Server, keyed by its `serialNo`.
+///
+/// `data` carries every selected column as a dynamic JSON map so the upstream
+/// schema can evolve without code changes here.
 #[derive(Debug, Clone)]
 pub struct SqlServerWeightRecord {
     pub serial_no: String,
     pub data: Map<String, Value>,
 }
 
+/// Reads pending rows from a SQL Server `tbl_weightInfo` source via `tiberius`.
 #[derive(Debug, Clone)]
 pub struct SqlServerSource {
     cfg: SqlServerConfig,
 }
 
 impl SqlServerSource {
+    /// Create a source, validating credentials and the table identifier.
     pub fn new(cfg: SqlServerConfig) -> anyhow::Result<Self> {
+        cfg.validate()?;
         validate_identifier(&cfg.table)?;
         Ok(Self { cfg })
     }
 
+    /// The configured SQL Server database name.
     pub fn database_name(&self) -> &str {
         &self.cfg.database
     }
 
+    /// The configured source table name.
     pub fn table_name(&self) -> &str {
         &self.cfg.table
     }
 
+    /// Whether successful uploads should be written back as `isUploadCloud = 1`.
     pub fn mark_uploaded_enabled(&self) -> bool {
         self.cfg.mark_uploaded
     }
 
+    /// Fetch up to `limit` rows where `isUploadCloud = 0` and `del_flag = 0`,
+    /// oldest first, converting each row to a [`SqlServerWeightRecord`].
     pub async fn fetch_pending(&self, limit: u32) -> anyhow::Result<Vec<SqlServerWeightRecord>> {
         let mut client = self.connect().await?;
         let sql = format!(
@@ -134,22 +149,32 @@ impl SqlServerSource {
         rows.into_iter().map(row_to_record).collect()
     }
 
+    /// Mark the given serial numbers as already uploaded (`isUploadCloud = 1`).
+    ///
+    /// Issued as a single parameterized `UPDATE ... WHERE [serialNo] IN (@P1, ...)`
+    /// per chunk (see [`MARK_UPLOAD_CHUNK_SIZE`]) rather than one round-trip per row.
     pub async fn mark_uploaded(&self, serial_nos: &[String]) -> anyhow::Result<()> {
         if serial_nos.is_empty() || !self.cfg.mark_uploaded {
             return Ok(());
         }
 
         let mut client = self.connect().await?;
-        let sql = format!(
-            "UPDATE {table} SET [isUploadCloud] = 1 WHERE [serialNo] = @P1",
-            table = quoted_identifier(&self.cfg.table)
-        );
+        let table = quoted_identifier(&self.cfg.table);
 
-        for serial_no in serial_nos {
-            client
-                .execute(&sql, &[serial_no])
-                .await
-                .with_context(|| format!("failed to mark serialNo {serial_no} as uploaded"))?;
+        for chunk in serial_nos.chunks(MARK_UPLOAD_CHUNK_SIZE) {
+            let params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("@P{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                "UPDATE {table} SET [isUploadCloud] = 1 WHERE [serialNo] IN ({placeholders})"
+            );
+
+            client.execute(&sql, &params).await.with_context(|| {
+                format!("failed to mark {} SQL Server rows as uploaded", chunk.len())
+            })?;
         }
 
         info!(
@@ -340,4 +365,55 @@ fn validate_identifier(identifier: &str) -> anyhow::Result<()> {
         bail!("invalid SQL Server identifier: {identifier}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiberius::numeric::Numeric;
+
+    #[test]
+    fn weight_info_columns_count_is_stable() {
+        // One bracketed column per entry; 66 mirrors the tbl_weightInfo schema.
+        assert_eq!(WEIGHT_INFO_COLUMNS.len(), 66);
+        assert_eq!(
+            select_columns().split(',').count(),
+            WEIGHT_INFO_COLUMNS.len()
+        );
+    }
+
+    #[test]
+    fn quoted_identifier_escapes_closing_brackets() {
+        assert_eq!(quoted_identifier("tbl_weightInfo"), "[tbl_weightInfo]");
+        assert_eq!(quoted_identifier("a]b"), "[a]]b]");
+        assert_eq!(quoted_identifier("]"), "[]]]");
+    }
+
+    #[test]
+    fn validate_identifier_accepts_and_rejects() {
+        assert!(validate_identifier("tbl_weightInfo").is_ok());
+        assert!(validate_identifier("dbo.tbl_weightInfo").is_ok());
+        assert!(validate_identifier("camelCase_1").is_ok());
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("tbl; DROP").is_err());
+        assert!(validate_identifier("col name").is_err());
+        assert!(validate_identifier("col'name").is_err());
+    }
+
+    #[test]
+    fn json_number_rejects_non_finite() {
+        assert!(json_number(f64::NAN).is_err());
+        assert!(json_number(f64::INFINITY).is_err());
+        assert!(json_number(f64::NEG_INFINITY).is_err());
+        assert!(json_number(1.5).is_ok());
+        assert!(json_number(0.0).is_ok());
+    }
+
+    #[test]
+    fn format_numeric_preserves_scale_and_sign() {
+        assert_eq!(format_numeric(Numeric::new_with_scale(12345, 2)), "123.45");
+        assert_eq!(format_numeric(Numeric::new_with_scale(42, 0)), "42");
+        assert_eq!(format_numeric(Numeric::new_with_scale(-123, 2)), "-1.23");
+        assert_eq!(format_numeric(Numeric::new_with_scale(5, 3)), "0.005");
+    }
 }

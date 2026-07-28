@@ -11,13 +11,18 @@ enabled = false
 bind = "0.0.0.0:8080"
 route = "/weighing-data-sync/put"
 max_body_bytes = 16777216
+# When set, the receive endpoint requires `Authorization: Bearer <api_key>`.
+# api_key = "replace-with-a-strong-token"
+# When true, every received batch is also persisted into local SQLite.
+persist = false
 
 [sqlserver]
-host = "192.168.10.251"
+host = "your-sqlserver-host"
 port = 1433
 database = "yunfu"
 username = "sa"
-password = "yusilong"
+# Supply the real password via WDS__SQLSERVER__PASSWORD (do not commit it).
+password = "CHANGE_ME_VIA_ENV"
 table = "tbl_weightInfo"
 trust_cert = true
 encryption = "off"

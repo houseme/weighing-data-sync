@@ -9,7 +9,7 @@ use weighing_data_sync::{
     config::AppConfig,
     db, server,
     source::sqlserver::SqlServerSource,
-    sync::{engine::SyncEngine, sqlserver_engine::SqlServerSyncEngine},
+    sync::{SyncOutcome, engine::SyncEngine, sqlserver_engine::SqlServerSyncEngine},
     windows,
 };
 
@@ -71,9 +71,39 @@ async fn serve(config_path: &str) -> anyhow::Result<()> {
         stage = "server.startup",
         bind = %cfg.server.bind,
         route = %cfg.server.route,
+        persist = cfg.server.persist,
         "准备启动称重数据接收服务"
     );
-    server::run_http_server(cfg.server).await
+    let db_pool = open_persist_pool(&cfg).await;
+    server::run_http_server(cfg.server, db_pool).await
+}
+
+/// Open a SQLite pool for inbound persistence when `server.persist` is enabled.
+///
+/// Persistence is best-effort: if the connection cannot be established, the
+/// receive server still runs and logs payloads (returns `None`).
+async fn open_persist_pool(cfg: &AppConfig) -> Option<db::DbPool> {
+    if !cfg.server.persist {
+        return None;
+    }
+    match db::connect(&cfg.database).await {
+        Ok(pool) => {
+            info!(
+                stage = "database.ready",
+                database_url = %cfg.database.url,
+                "接收服务已连接本地 SQLite 缓存用于持久化"
+            );
+            Some(pool)
+        }
+        Err(error) => {
+            warn!(
+                stage = "database.error",
+                %error,
+                "接收服务连接 SQLite 失败，本次仅记录日志不落库"
+            );
+            None
+        }
+    }
 }
 
 fn init_logging() {
@@ -110,8 +140,9 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
 
     if cfg.server.enabled {
         let server_cfg = cfg.server.clone();
+        let db_pool = open_persist_pool(&cfg).await;
         tokio::spawn(async move {
-            if let Err(error) = server::run_http_server(server_cfg).await {
+            if let Err(error) = server::run_http_server(server_cfg, db_pool).await {
                 error!(stage = "server.error", %error, "称重数据接收服务异常退出");
             }
         });
@@ -152,10 +183,10 @@ enum AppEngine {
 }
 
 impl AppEngine {
-    async fn sync_once(&self) -> anyhow::Result<serde_json::Value> {
+    async fn sync_once(&self) -> anyhow::Result<SyncOutcome> {
         match self {
-            Self::Local(engine) => Ok(serde_json::to_value(engine.sync_once().await?)?),
-            Self::SqlServer(engine) => Ok(serde_json::to_value(engine.sync_once().await?)?),
+            Self::Local(engine) => engine.sync_once().await,
+            Self::SqlServer(engine) => engine.sync_once().await,
         }
     }
 }

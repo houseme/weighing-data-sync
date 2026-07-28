@@ -3,7 +3,8 @@ use std::path::Path;
 use anyhow::{Context, anyhow};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
-    DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set,
+    DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    Statement, Value, sea_query::Expr,
 };
 use uuid::Uuid;
 
@@ -17,6 +18,8 @@ pub mod models;
 
 pub type DbPool = DatabaseConnection;
 
+/// Connect to the local SQLite cache, creating the database file and running
+/// migrations (creates `weighing_records` and `inbound_payloads` if absent).
 pub async fn connect(cfg: &DatabaseConfig) -> anyhow::Result<DbPool> {
     ensure_sqlite_parent_dir(&cfg.url)?;
 
@@ -33,6 +36,7 @@ pub async fn connect(cfg: &DatabaseConfig) -> anyhow::Result<DbPool> {
     Ok(db)
 }
 
+/// Insert a single [`WeighingRecord`] into the local cache as a pending row.
 pub async fn insert_record(db: &DbPool, record: &WeighingRecord) -> anyhow::Result<()> {
     let active = weighing_record::ActiveModel {
         id: Set(record.id.to_string()),
@@ -56,6 +60,7 @@ pub async fn insert_record(db: &DbPool, record: &WeighingRecord) -> anyhow::Resu
     Ok(())
 }
 
+/// Fetch up to `limit` pending or failed records, oldest first, for upload.
 pub async fn fetch_pending(db: &DbPool, limit: u32) -> anyhow::Result<Vec<WeighingRecord>> {
     let models = WeighingRecordEntity::find()
         .filter(Column::Status.is_in(["pending", "failed"]))
@@ -68,49 +73,88 @@ pub async fn fetch_pending(db: &DbPool, limit: u32) -> anyhow::Result<Vec<Weighi
     models.into_iter().map(WeighingRecord::try_from).collect()
 }
 
+/// Mark the given records as successfully synced, clearing any prior error.
+///
+/// Issued as a single bulk `UPDATE ... WHERE id IN (...)` instead of a per-row
+/// load-and-save, so a batch of N records costs one round-trip rather than N.
 pub async fn mark_synced(db: &DbPool, ids: &[Uuid]) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-
-    for id in ids {
-        let model = WeighingRecordEntity::find_by_id(id.to_string())
-            .one(db)
-            .await
-            .with_context(|| format!("failed to load record {id} for synced update"))?
-            .with_context(|| format!("weighing record {id} not found"))?;
-
-        let mut active = model.into_active_model();
-        active.status = Set("synced".to_owned());
-        active.last_error = Set(None);
-        active.updated_at = Set(now.clone());
-        active
-            .update(db)
-            .await
-            .with_context(|| format!("failed to mark record {id} as synced with SeaORM"))?;
+    if ids.is_empty() {
+        return Ok(());
     }
+    let now = chrono::Utc::now().to_rfc3339();
+    let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+
+    WeighingRecordEntity::update_many()
+        .col_expr(Column::Status, Expr::val("synced"))
+        .col_expr(Column::LastError, Expr::val(None::<String>))
+        .col_expr(Column::UpdatedAt, Expr::val(now))
+        .filter(Column::Id.is_in(id_strings))
+        .exec(db)
+        .await
+        .context("failed to mark records as synced with SeaORM")?;
     Ok(())
 }
 
+/// Mark the given records as failed: increment `retry_count`, record the error.
+///
+/// Bulk `UPDATE ... WHERE id IN (...)` with `retry_count = retry_count + 1`.
 pub async fn mark_failed(db: &DbPool, ids: &[Uuid], error: &str) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-
-    for id in ids {
-        let model = WeighingRecordEntity::find_by_id(id.to_string())
-            .one(db)
-            .await
-            .with_context(|| format!("failed to load record {id} for failed update"))?
-            .with_context(|| format!("weighing record {id} not found"))?;
-
-        let retry_count = model.retry_count;
-        let mut active = model.into_active_model();
-        active.status = Set("failed".to_owned());
-        active.retry_count = Set(retry_count + 1);
-        active.last_error = Set(Some(error.to_owned()));
-        active.updated_at = Set(now.clone());
-        active
-            .update(db)
-            .await
-            .with_context(|| format!("failed to mark record {id} as failed with SeaORM"))?;
+    if ids.is_empty() {
+        return Ok(());
     }
+    let now = chrono::Utc::now().to_rfc3339();
+    let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+
+    WeighingRecordEntity::update_many()
+        .col_expr(Column::Status, Expr::val("failed"))
+        .col_expr(Column::RetryCount, Expr::col(Column::RetryCount).add(1))
+        .col_expr(Column::LastError, Expr::val(error.to_owned()))
+        .col_expr(Column::UpdatedAt, Expr::val(now))
+        .filter(Column::Id.is_in(id_strings))
+        .exec(db)
+        .await
+        .context("failed to mark records as failed with SeaORM")?;
+    Ok(())
+}
+
+/// Persist a single received batch as raw JSON for auditing / local-first receipt.
+///
+/// One row per inbound HTTP request is written to the `inbound_payloads` table,
+/// keyed by `request_id`. This realizes the "local-first receipt" goal without
+/// forcing a mapping onto the [`WeighingRecord`] schema.
+pub async fn insert_inbound_payload(
+    db: &DbPool,
+    request_id: &Uuid,
+    source: &str,
+    database: &str,
+    table: &str,
+    records_count: usize,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let payload_json =
+        serde_json::to_string(payload).context("failed to serialize inbound payload")?;
+    let received_at = chrono::Utc::now().to_rfc3339();
+    let values: Vec<Value> = vec![
+        request_id.to_string().into(),
+        source.to_string().into(),
+        database.to_string().into(),
+        table.to_string().into(),
+        (records_count as i64).into(),
+        payload_json.into(),
+        received_at.into(),
+    ];
+
+    let stmt = Statement::from_sql_and_values(
+        DatabaseBackend::Sqlite,
+        r#"INSERT INTO inbound_payloads
+           (request_id, source, source_db, source_table, records_count, payload_json, received_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        values,
+    );
+
+    db.execute_raw(stmt)
+        .await
+        .context("failed to insert inbound payload")?;
     Ok(())
 }
 
@@ -151,6 +195,23 @@ async fn run_migrations(db: &DbPool) -> anyhow::Result<()> {
     .await
     .context("failed to create weighing_records status index")?;
 
+    execute_sql(
+        db,
+        r#"
+        CREATE TABLE IF NOT EXISTS inbound_payloads (
+            request_id TEXT PRIMARY KEY NOT NULL,
+            source TEXT NOT NULL,
+            source_db TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            records_count INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            received_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .await
+    .context("failed to create inbound_payloads table")?;
+
     Ok(())
 }
 
@@ -165,12 +226,11 @@ fn ensure_sqlite_parent_dir(url: &str) -> anyhow::Result<()> {
     }
 
     let path = sqlite_path(url);
-    if let Some(parent) = path.as_deref().and_then(|path| Path::new(path).parent()) {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create database directory {}", parent.display())
-            })?;
-        }
+    if let Some(parent) = path.as_deref().and_then(|path| Path::new(path).parent())
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create database directory {}", parent.display()))?;
     }
 
     if let Some(path) = path.filter(|path| path != ":memory:") {
@@ -190,4 +250,55 @@ fn sqlite_path(url: &str) -> Option<String> {
         .or_else(|| without_query.strip_prefix("sqlite:"))
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DatabaseConfig;
+    use crate::db::models::SyncStatus;
+
+    fn mem_cfg() -> DatabaseConfig {
+        DatabaseConfig {
+            url: "sqlite::memory:".to_owned(),
+            max_connections: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_fetch_mark_round_trip() {
+        let db = connect(&mem_cfg()).await.expect("connect in-memory sqlite");
+        let now = chrono::Utc::now();
+
+        let synced =
+            WeighingRecord::new_kg("T1", "S1", Some("皖A12345".to_owned()), 1234.5, now).unwrap();
+        let synced_id = synced.id;
+        insert_record(&db, &synced).await.unwrap();
+
+        let failed = WeighingRecord::new_kg("T2", "S1", None, 50.0, now).unwrap();
+        let failed_id = failed.id;
+        insert_record(&db, &failed).await.unwrap();
+
+        let pending = fetch_pending(&db, 10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].status, SyncStatus::Pending);
+
+        // Bulk mark_synced removes the record from the pending/failed set.
+        mark_synced(&db, &[synced_id]).await.unwrap();
+        let pending = fetch_pending(&db, 10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending.iter().all(|r| r.id != synced_id));
+
+        // Bulk mark_failed increments retry_count and records the error.
+        mark_failed(&db, &[failed_id], "boom").await.unwrap();
+        let pending = fetch_pending(&db, 10).await.unwrap();
+        let failed_row = pending.iter().find(|r| r.id == failed_id).unwrap();
+        assert_eq!(failed_row.status, SyncStatus::Failed);
+        assert_eq!(failed_row.retry_count, 1);
+        assert_eq!(failed_row.last_error.as_deref(), Some("boom"));
+
+        // Idempotency guards: empty id slices are no-ops.
+        mark_synced(&db, &[]).await.unwrap();
+        mark_failed(&db, &[], "x").await.unwrap();
+    }
 }

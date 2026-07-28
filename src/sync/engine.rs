@@ -1,7 +1,7 @@
 #[cfg(feature = "compression")]
 use std::io::Write;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use backoff::ExponentialBackoffBuilder;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -11,10 +11,16 @@ use uuid::Uuid;
 
 use crate::{
     config::{ApiConfig, SyncConfig},
-    db::models::WeighingRecord,
-    db::{self, DbPool},
+    db::{self, DbPool, models::WeighingRecord},
+    sync::SyncOutcome,
+    sync::error::UploadError,
 };
 
+/// Local SQLite cache -> cloud synchronization engine.
+///
+/// Reads pending rows from the local [`crate::db`] cache, uploads them as a JSON
+/// batch to the cloud endpoint with exponential backoff, and marks each row
+/// `synced` or `failed` depending on the response.
 #[derive(Debug, Clone)]
 pub struct SyncEngine {
     pool: DbPool,
@@ -50,21 +56,9 @@ struct BatchUploadResponse {
     failed_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SyncSummary {
-    pub fetched: usize,
-    pub synced: usize,
-    pub failed: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncResult {
-    NoData,
-    Completed(SyncSummary),
-}
-
 impl SyncEngine {
+    /// Build an engine bound to a SQLite pool, an HTTP client tuned to the API
+    /// timeout, and the sync tuning parameters.
     pub fn new(pool: DbPool, api: ApiConfig, sync: SyncConfig) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(api.timeout())
@@ -79,11 +73,12 @@ impl SyncEngine {
         })
     }
 
-    pub async fn sync_once(&self) -> anyhow::Result<SyncResult> {
+    /// Run a single sync cycle: fetch pending, upload with retry, mark results.
+    pub async fn sync_once(&self) -> anyhow::Result<SyncOutcome> {
         let records = db::fetch_pending(&self.pool, self.sync.batch_size).await?;
         if records.is_empty() {
             info!(stage = "sync.fetch", "没有待同步称重记录");
-            return Ok(SyncResult::NoData);
+            return Ok(SyncOutcome::no_data());
         }
 
         let record_ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
@@ -104,7 +99,7 @@ impl SyncEngine {
             || async {
                 self.upload_batch(&records)
                     .await
-                    .map_err(backoff::Error::transient)
+                    .map_err(UploadError::into_backoff)
             },
             |error: anyhow::Error, delay: std::time::Duration| {
                 warn!(
@@ -121,7 +116,8 @@ impl SyncEngine {
             Ok(response) => response,
             Err(error) => {
                 db::mark_failed(&self.pool, &record_ids, &error.to_string()).await?;
-                return Err(error).context("batch upload failed after retry budget was exhausted");
+                return Err(error)
+                    .context("batch upload failed (permanent error or retry budget exhausted)");
             }
         };
 
@@ -144,19 +140,21 @@ impl SyncEngine {
             .await?;
         }
 
-        let summary = SyncSummary {
+        let outcome = SyncOutcome {
             fetched: records.len(),
             synced: accepted_ids.len(),
             failed: response.failed_ids.len(),
+            marked_uploaded: None,
+            no_data: false,
         };
-        info!(stage = "sync.upload.done", ?summary, "批量同步完成");
-        Ok(SyncResult::Completed(summary))
+        info!(stage = "sync.upload.done", ?outcome, "批量同步完成");
+        Ok(outcome)
     }
 
     async fn upload_batch(
         &self,
         records: &[WeighingRecord],
-    ) -> anyhow::Result<BatchUploadResponse> {
+    ) -> Result<BatchUploadResponse, UploadError> {
         let payload = BatchUploadRequest {
             source: "weighing-data-sync",
             uploaded_at: Utc::now(),
@@ -168,10 +166,12 @@ impl SyncEngine {
             request = request.bearer_auth(api_key);
         }
 
-        let response = build_payload_request(request, &payload)?
+        let response = build_payload_request(request, &payload)
+            .map_err(UploadError::Permanent)?
             .send()
             .await
-            .context("failed to send upload request")?;
+            .context("failed to send upload request")
+            .map_err(UploadError::Transient)?;
 
         let status = response.status();
         if status == StatusCode::NO_CONTENT {
@@ -183,13 +183,14 @@ impl SyncEngine {
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("remote upload failed with status {status}: {body}"));
+            return Err(UploadError::from_status(status, body));
         }
 
         response
             .json::<BatchUploadResponse>()
             .await
             .context("failed to decode upload response")
+            .map_err(UploadError::Permanent)
     }
 }
 

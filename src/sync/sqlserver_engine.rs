@@ -1,7 +1,7 @@
 #[cfg(feature = "compression")]
 use std::io::Write;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use backoff::ExponentialBackoffBuilder;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -12,8 +12,15 @@ use tracing::{info, warn};
 use crate::{
     config::{ApiConfig, SyncConfig},
     source::sqlserver::SqlServerSource,
+    sync::SyncOutcome,
+    sync::error::UploadError,
 };
 
+/// SQL Server `tbl_weightInfo` -> cloud synchronization engine.
+///
+/// Reads rows flagged `isUploadCloud = 0` via [`SqlServerSource`], uploads them as
+/// a JSON batch with exponential backoff, and on success writes back
+/// `isUploadCloud = 1` (when `mark_uploaded` is enabled).
 #[derive(Debug, Clone)]
 pub struct SqlServerSyncEngine {
     http: reqwest::Client,
@@ -31,29 +38,16 @@ struct SqlServerUploadRequest {
     records: Vec<Map<String, Value>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct SqlServerUploadResponse {
     accepted_serial_nos: Vec<String>,
     failed_serial_nos: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SqlServerSyncSummary {
-    pub fetched: usize,
-    pub uploaded: usize,
-    pub failed: usize,
-    pub marked_uploaded: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SqlServerSyncResult {
-    NoData,
-    Completed(SqlServerSyncSummary),
-}
-
 impl SqlServerSyncEngine {
+    /// Build an engine over a SQL Server source with an HTTP client tuned to the
+    /// API timeout and the sync tuning parameters.
     pub fn new(api: ApiConfig, sync: SyncConfig, source: SqlServerSource) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(api.timeout())
@@ -68,14 +62,15 @@ impl SqlServerSyncEngine {
         })
     }
 
-    pub async fn sync_once(&self) -> anyhow::Result<SqlServerSyncResult> {
+    /// Run a single sync cycle: fetch pending rows, upload with retry, mark uploaded.
+    pub async fn sync_once(&self) -> anyhow::Result<SyncOutcome> {
         let records = self.source.fetch_pending(self.sync.batch_size).await?;
         if records.is_empty() {
             info!(
                 stage = "sqlserver.fetch",
                 "没有待上报的 SQL Server 称重记录"
             );
-            return Ok(SqlServerSyncResult::NoData);
+            return Ok(SyncOutcome::no_data());
         }
 
         let serial_nos = records
@@ -102,9 +97,9 @@ impl SqlServerSyncEngine {
         let response = backoff::future::retry_notify(
             retry_policy,
             || async {
-                self.upload_batch(payload_records.clone())
+                self.upload_batch(&payload_records)
                     .await
-                    .map_err(backoff::Error::transient)
+                    .map_err(UploadError::into_backoff)
             },
             |error: anyhow::Error, delay: std::time::Duration| {
                 warn!(
@@ -115,8 +110,16 @@ impl SqlServerSyncEngine {
                 );
             },
         )
-        .await
-        .context("SQL Server batch upload failed after retry budget was exhausted")?;
+        .await;
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(error).context(
+                    "SQL Server upload failed (permanent error or retry budget exhausted)",
+                );
+            }
+        };
 
         let accepted_serial_nos =
             if response.accepted_serial_nos.is_empty() && response.failed_serial_nos.is_empty() {
@@ -125,35 +128,39 @@ impl SqlServerSyncEngine {
                 response.accepted_serial_nos
             };
 
-        if !accepted_serial_nos.is_empty() {
+        let marked_uploaded = if accepted_serial_nos.is_empty() {
+            self.source.mark_uploaded_enabled()
+        } else {
             self.source.mark_uploaded(&accepted_serial_nos).await?;
-        }
+            self.source.mark_uploaded_enabled()
+        };
 
-        let summary = SqlServerSyncSummary {
+        let outcome = SyncOutcome {
             fetched: serial_nos.len(),
-            uploaded: accepted_serial_nos.len(),
+            synced: accepted_serial_nos.len(),
             failed: response.failed_serial_nos.len(),
-            marked_uploaded: self.source.mark_uploaded_enabled(),
+            marked_uploaded: Some(marked_uploaded),
+            no_data: false,
         };
 
         info!(
             stage = "sqlserver.upload.done",
-            ?summary,
+            ?outcome,
             "SQL Server 数据上报完成"
         );
-        Ok(SqlServerSyncResult::Completed(summary))
+        Ok(outcome)
     }
 
     async fn upload_batch(
         &self,
-        records: Vec<Map<String, Value>>,
-    ) -> anyhow::Result<SqlServerUploadResponse> {
+        records: &[Map<String, Value>],
+    ) -> Result<SqlServerUploadResponse, UploadError> {
         let payload = SqlServerUploadRequest {
             source: "sqlserver-yunfu-tbl_weightInfo",
             database: self.source.database_name().to_owned(),
             table: self.source.table_name().to_owned(),
             uploaded_at: Utc::now(),
-            records,
+            records: records.to_vec(),
         };
 
         let mut request = self.http.post(&self.api.endpoint);
@@ -161,10 +168,12 @@ impl SqlServerSyncEngine {
             request = request.bearer_auth(api_key);
         }
 
-        let response = build_payload_request(request, &payload)?
+        let response = build_payload_request(request, &payload)
+            .map_err(UploadError::Permanent)?
             .send()
             .await
-            .context("failed to send SQL Server upload request")?;
+            .context("failed to send SQL Server upload request")
+            .map_err(UploadError::Transient)?;
 
         let status = response.status();
         if status == StatusCode::NO_CONTENT {
@@ -173,29 +182,21 @@ impl SqlServerSyncEngine {
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "remote SQL Server upload failed with status {status}: {body}"
-            ));
+            return Err(UploadError::from_status(status, body));
         }
 
         let body = response
             .text()
             .await
-            .context("failed to read SQL Server upload response body")?;
+            .context("failed to read SQL Server upload response body")
+            .map_err(UploadError::Transient)?;
         if body.trim().is_empty() {
             return Ok(SqlServerUploadResponse::default());
         }
 
-        serde_json::from_str(&body).context("failed to decode SQL Server upload response")
-    }
-}
-
-impl Default for SqlServerUploadResponse {
-    fn default() -> Self {
-        Self {
-            accepted_serial_nos: Vec::new(),
-            failed_serial_nos: Vec::new(),
-        }
+        serde_json::from_str(&body)
+            .context("failed to decode SQL Server upload response")
+            .map_err(UploadError::Permanent)
     }
 }
 
