@@ -36,8 +36,7 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 ```text
 weighing-data-sync/
 ├── README.md
-├── LICENSE-MIT
-├── LICENSE-APACHE
+├── LICENSE-AGPL
 ├── Cargo.toml
 ├── config/
 │   └── default.toml

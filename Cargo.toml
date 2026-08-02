@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Reliable weighing-data synchronization daemon for local SQLite cache and cloud upload."
-authors = ["Anhui Shangheng Technology Co., Ltd."]
-license = "MIT OR Apache-2.0"
+authors = ["houseme <housemecn@gmail.com>"]
+license = "AGPL-3.0-only"
 
 [dependencies]
 anyhow = "1"

@@ -47,4 +47,4 @@ config + dotenvy · clap · tokio-cron-scheduler · backoff · tracing · uom
 
 ## 许可证
 
-MIT OR Apache-2.0，见 [`LICENSE-MIT`](LICENSE-MIT) 与 [`LICENSE-APACHE`](LICENSE-APACHE)。
+AGPL-3.0-only，见 [`LICENSE-AGPL`](LICENSE-AGPL)。
