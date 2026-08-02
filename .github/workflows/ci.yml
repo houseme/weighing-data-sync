@@ -9,13 +9,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt / clippy / test / check
+  feature-validation:
+    name: fmt / clippy / all-features / feature-powerset
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
@@ -26,7 +28,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ci-feature-validation-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-hack
         run: cargo install cargo-hack --locked || true
@@ -34,11 +36,95 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Clippy
+      - name: Clippy all targets and all features
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Test
+      - name: Test all features
         run: cargo test --all-features
 
-      - name: Check all feature combinations
-        run: cargo hack check --each-feature --no-dev-deps || cargo check --all-features
+      - name: Check feature powerset
+        run: cargo hack check --feature-powerset --no-dev-deps || cargo check --all-features
+
+      - name: Analyze Cargo feature coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > metadata.json
+          ruby <<'RUBY'
+          require "json"
+
+          metadata = JSON.parse(File.read("metadata.json"))
+          package = metadata.fetch("packages").find { |pkg| pkg.fetch("name") == "weighing-data-sync" }
+          features = package.fetch("features")
+          all_features = features.keys.sort
+          default_features = features.fetch("default", []).sort
+          optional_features = (all_features - ["default"]).sort
+          non_windows_features = (default_features + %w[compression websocket]).uniq.sort
+          windows_features = (non_windows_features + %w[windows]).uniq.sort
+
+          puts "Cargo features: #{all_features.join(", ")}"
+          puts "Default features: #{default_features.join(", ")}"
+          puts "Non-Windows CI/release features: #{non_windows_features.join(", ")}"
+          puts "Windows CI/release features: #{windows_features.join(", ")}"
+
+          missing_non_windows = optional_features - non_windows_features - %w[windows]
+          missing_windows = optional_features - windows_features
+          abort "Non-Windows feature set is missing: #{missing_non_windows.join(", ")}" unless missing_non_windows.empty?
+          abort "Windows feature set is missing: #{missing_windows.join(", ")}" unless missing_windows.empty?
+          RUBY
+
+  platform-validation:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: compression,websocket
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: compression,websocket
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: windows,compression,websocket
+          - name: windows-aarch64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            features: windows,compression,websocket
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            features: compression,websocket
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            features: compression,websocket
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check target
+        run: cargo check --locked --target ${{ matrix.target }} --features ${{ matrix.features }}
+
+      - name: Test target
+        run: cargo test --locked --target ${{ matrix.target }} --features ${{ matrix.features }}
