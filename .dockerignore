@@ -1,0 +1,9 @@
+target/
+data/
+.git/
+.idea/
+.vscode/
+.env
+.env.*
+*.db
+*.db-*

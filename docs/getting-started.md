@@ -47,6 +47,9 @@ RUST_LOG=info WDS__SYNC__SOURCE=local cargo run -- sync-now --config config/defa
 
 # 启动 HTTP 接收服务（本机验证）
 RUST_LOG=info WDS__SERVER__BIND=127.0.0.1:18080 cargo run -- serve --config config/default.toml
+
+# Docker 端到端验证：模拟 SQL Server → HTTP 接收端 → SQLite 落库 → SQL Server 回写
+scripts/validate_sqlserver_e2e.sh
 ```
 
 ## 本机快速验证（HTTP 接收）
@@ -82,6 +85,17 @@ cargo test
 
 覆盖重量单位换算、状态机往返、SQL 标识符转义、`Numeric` 格式化、重试错误分类、
 SQLite 缓存的 insert / fetch / mark 往返等纯逻辑或内存 SQLite 路径，不依赖外部服务。
+
+## Docker SQL Server 端到端验证
+
+仓库内置 `docker/docker-compose.e2e.yml`，会启动模拟 SQL Server 数据源、HTTP 接收端、一次性
+同步器和验收器。运行：
+
+```bash
+scripts/validate_sqlserver_e2e.sh
+```
+
+验证详情、样本数据和平台限制见 [SQL Server Docker 端到端验证](sqlserver-docker-e2e.md)。
 
 ## 下一步
 

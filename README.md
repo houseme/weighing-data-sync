@@ -17,6 +17,7 @@ cargo fmt --all && cargo check
 cargo run -- run --config config/default.toml          # 守护进程（默认 SQL Server 链路）
 WDS__SYNC__SOURCE=local cargo run -- sync-now           # 用本地缓存链路手动同步一次
 cargo run -- serve --config config/default.toml         # 启动 HTTP 接收服务
+scripts/validate_sqlserver_e2e.sh                       # Docker SQL Server 端到端验证
 ```
 
 > ⚠️ 现场凭据（SQL Server 主机/账号/密码）**不再随仓库分发**。请通过
@@ -36,6 +37,7 @@ cargo run -- serve --config config/default.toml         # 启动 HTTP 接收服�
 | [HTTP 协议](docs/api-protocol.md) | 上报请求 / 响应 schema、Bearer 鉴权、204 / 空体语义 |
 | [日志与排障](docs/logging.md) | 结构化日志与 `stage` 目录、示例、排障流程 |
 | [架构](docs/architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制与 tiberius 方案 |
+| [SQL Server Docker E2E](docs/sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [常见问题](docs/troubleshooting.md) | SQL Server 连接失败、云端 4xx、占位符凭据、队头阻塞 |
 
 ## 技术栈

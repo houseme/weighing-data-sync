@@ -1,0 +1,119 @@
+services:
+  sqlserver:
+    build:
+      context: ..
+      dockerfile: docker/sqlserver/Dockerfile
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${WDS_E2E_SQLSERVER_PASSWORD:-WdsE2ePassw0rd_2026}
+    ports:
+      - "${WDS_E2E_SQLSERVER_PORT:-11433}:1433"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/wds/e2e/healthcheck.sh"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  receiver:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      WDS__DATABASE__URL: sqlite:///data/weighing_sync.db
+      WDS__SERVER__BIND: 0.0.0.0:8080
+      WDS__SERVER__API_KEY: e2e-token
+      WDS__SERVER__PERSIST: "true"
+    command: ["serve", "--config", "config/default.toml"]
+    ports:
+      - "${WDS_E2E_RECEIVER_PORT:-18080}:8080"
+    volumes:
+      - receiver-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8080/ >/dev/null"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  sync-runner:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      receiver:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      WDS__API__ENDPOINT: http://receiver:8080/weighing-data-sync/put
+      WDS__API__API_KEY: e2e-token
+      WDS__API__TIMEOUT_SECONDS: "15"
+      WDS__SQLSERVER__HOST: sqlserver
+      WDS__SQLSERVER__PORT: "1433"
+      WDS__SQLSERVER__DATABASE: yunfu
+      WDS__SQLSERVER__USERNAME: sa
+      WDS__SQLSERVER__PASSWORD: ${WDS_E2E_SQLSERVER_PASSWORD:-WdsE2ePassw0rd_2026}
+      WDS__SQLSERVER__TABLE: tbl_weightInfo
+      WDS__SQLSERVER__TRUST_CERT: "true"
+      WDS__SQLSERVER__ENCRYPTION: "off"
+      WDS__SQLSERVER__MARK_UPLOADED: "true"
+      WDS__SYNC__SOURCE: sqlserver
+      WDS__SYNC__BATCH_SIZE: "100"
+      WDS__SYNC__RETRY_INITIAL_DELAY_MS: "250"
+      WDS__SYNC__RETRY_MAX_DELAY_MS: "1000"
+      WDS__SYNC__RETRY_MAX_ELAPSED_SECONDS: "20"
+    command: ["sync-now", "--config", "config/default.toml"]
+
+  receiver-verify:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      sync-runner:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "/opt/wds/e2e/verify-receiver.sh"]
+    volumes:
+      - receiver-data:/data:ro
+
+  sqlserver-verify:
+    build:
+      context: ..
+      dockerfile: docker/sqlserver/Dockerfile
+    platform: linux/amd64
+    depends_on:
+      sync-runner:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "/opt/wds/e2e/verify-sqlserver.sh"]
+    environment:
+      MSSQL_SA_PASSWORD: ${WDS_E2E_SQLSERVER_PASSWORD:-WdsE2ePassw0rd_2026}
+
+  e2e:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      receiver-verify:
+        condition: service_completed_successfully
+      sqlserver-verify:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["echo 'weighing-data-sync SQL Server E2E verification passed'"]
+
+volumes:
+  receiver-data:

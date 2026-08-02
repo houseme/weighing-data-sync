@@ -28,6 +28,7 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | [HTTP 协议](api-protocol.md) | 上报请求 / 响应、鉴权、204 / 空体语义 |
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
+| [SQL Server Docker E2E](sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [常见问题](troubleshooting.md) | 连接失败、4xx、占位符凭据、队头阻塞 |
 
 ## 项目目录结构
@@ -40,6 +41,9 @@ weighing-data-sync/
 ├── Cargo.toml
 ├── config/
 │   └── default.toml
+├── docker/                     # SQL Server E2E Compose、样本数据、验收脚本
+├── scripts/
+│   └── validate_sqlserver_e2e.sh
 ├── data/                       # 运行期 SQLite（已 gitignore）
 ├── docs/                       # 本文档目录
 └── src/
@@ -80,6 +84,7 @@ weighing-data-sync/
 cargo fmt --all && cargo check && cargo test
 cargo check --all-features          # 覆盖 compression / websocket / windows 等特性
 cargo clippy --all-targets --all-features -- -D warnings
+scripts/validate_sqlserver_e2e.sh   # Docker SQL Server 端到端验证
 ```
 
 具体运行命令见 [快速开始](getting-started.md)，Windows 部署见 [Windows 部署](deployment-windows.md)。
