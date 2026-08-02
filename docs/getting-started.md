@@ -19,7 +19,7 @@ cargo build --release               # 发布构建
 
 ```bash
 cargo build --release --features compression     # gzip 压缩上报请求体
-cargo build --release --features websocket       # WebSocket 客户端占位（见架构文档）
+cargo build --release --features websocket       # WebSocket 批量上报客户端（见架构文档）
 cargo build --release --features windows         # Windows 专用入口（现场部署见 deployment-windows.md）
 ```
 

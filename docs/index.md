@@ -50,7 +50,7 @@ weighing-data-sync/
     ├── main.rs                 # CLI 入口、日志、调度、子命令分发
     ├── config.rs               # AppConfig / Api / Database / Server / Sync / SqlServer
     ├── server.rs               # axum HTTP 接收服务（鉴权 + 可选落库）
-    ├── client/                 # 可选 WebSocket 客户端占位（websocket 特性）
+    ├── client/                 # 可选 WebSocket 批量上报客户端（websocket 特性）
     ├── entity/
     │   ├── weighing_record.rs  # 本地 SQLite 缓存表 SeaORM Entity
     │   ├── weight_info.rs      # tbl_weightInfo 表结构映射（迁移基础）

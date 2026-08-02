@@ -2,7 +2,6 @@
 use std::io::Write;
 
 use anyhow::Context;
-use backoff::ExponentialBackoffBuilder;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,7 @@ use crate::{
     source::sqlserver::SqlServerSource,
     sync::SyncOutcome,
     sync::error::UploadError,
+    sync::retry::retry_transient,
 };
 
 /// SQL Server `tbl_weightInfo` -> cloud synchronization engine.
@@ -88,20 +88,12 @@ impl SqlServerSyncEngine {
             "开始上报 SQL Server tbl_weightInfo 数据"
         );
 
-        let retry_policy = ExponentialBackoffBuilder::new()
-            .with_initial_interval(self.sync.retry_initial_delay())
-            .with_max_interval(self.sync.retry_max_delay())
-            .with_max_elapsed_time(Some(self.sync.retry_max_elapsed()))
-            .build();
-
-        let response = backoff::future::retry_notify(
-            retry_policy,
-            || async {
-                self.upload_batch(&payload_records)
-                    .await
-                    .map_err(UploadError::into_backoff)
-            },
-            |error: anyhow::Error, delay: std::time::Duration| {
+        let response = retry_transient(
+            self.sync.retry_initial_delay(),
+            self.sync.retry_max_delay(),
+            self.sync.retry_max_elapsed(),
+            || async { self.upload_batch(&payload_records).await },
+            |error, delay| {
                 warn!(
                     stage = "sqlserver.retry",
                     %error,

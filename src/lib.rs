@@ -17,7 +17,7 @@
 //!
 //! - `sqlite` / `http` / `cron`：默认启用，保证非 Windows 开发机可直接编译。
 //! - `compression`：gzip 压缩上报请求体。
-//! - `websocket`：WebSocket 客户端入口（占位实现，见 [`client`]）。
+//! - `websocket`：WebSocket 批量上报客户端入口（见 [`client`]）。
 //! - `windows`：Windows 服务安装与注册表自启动（仅 `cfg(windows)`）。
 //!
 //! 配置详见 [`config::AppConfig`]，HTTP 接收服务详见 [`server`]。
@@ -32,7 +32,7 @@ pub mod windows;
 
 /// 可选的云端客户端实现（WebSocket 等）。
 ///
-/// 仅在启用 `websocket` 特性时编译。当前仅提供 WebSocket 客户端的占位实现；
-/// 主传输通道仍为 HTTP，由同步引擎内部直接实现。
+/// 仅在启用 `websocket` 特性时编译。当前提供批量 JSON 上报与服务端 ACK 解析；
+/// 主生产传输通道仍为 HTTP，由同步引擎内部直接实现。
 #[cfg(feature = "websocket")]
 pub mod client;

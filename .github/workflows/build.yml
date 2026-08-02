@@ -6,6 +6,16 @@ on:
       - "v*"
       - "*.*.*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Artifact tag/name to use for manual builds, for example v0.1.0"
+        required: false
+        default: "manual"
+      publish_release:
+        description: "Upload manual build artifacts to a GitHub Release using release_tag"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -14,6 +24,7 @@ env:
   CARGO_TERM_COLOR: always
   BIN_NAME: sync-daemon
   PACKAGE_NAME: weighing-data-sync
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
 
 jobs:
   validate:
@@ -22,6 +33,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Validate manual release inputs
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" || "${RELEASE_TAG}" == "manual" ]]; then
+            echo "release_tag must be set to a real tag name when publish_release is true" >&2
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -151,14 +172,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME:-manual}"
+          tag="${RELEASE_TAG:-manual}"
           artifact="${PACKAGE_NAME}-${tag}-${{ matrix.name }}"
           mkdir -p "dist/${artifact}"
 
           exe="${BIN_NAME}"
-          if [[ "${{ matrix.os }}" == windows-* ]]; then
-            exe="${BIN_NAME}.exe"
-          fi
+          case "${{ matrix.os }}" in
+            windows-*) exe="${BIN_NAME}.exe" ;;
+          esac
 
           cp "target/${{ matrix.target }}/release/${exe}" "dist/${artifact}/"
           cp README.md LICENSE-AGPL "dist/${artifact}/"
@@ -170,7 +191,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME:-manual}"
+          tag="${RELEASE_TAG:-manual}"
           artifact="${PACKAGE_NAME}-${tag}-${{ matrix.name }}"
           mkdir -p artifacts
 
@@ -183,12 +204,13 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.PACKAGE_NAME }}-${{ github.ref_name }}-${{ matrix.name }}
+          name: ${{ env.PACKAGE_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.name }}
           path: artifacts/*
           if-no-files-found: error
 
       - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: artifacts/*

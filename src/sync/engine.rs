@@ -2,7 +2,6 @@
 use std::io::Write;
 
 use anyhow::Context;
-use backoff::ExponentialBackoffBuilder;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,7 @@ use crate::{
     db::{self, DbPool, models::WeighingRecord},
     sync::SyncOutcome,
     sync::error::UploadError,
+    sync::retry::retry_transient,
 };
 
 /// Local SQLite cache -> cloud synchronization engine.
@@ -88,20 +88,12 @@ impl SyncEngine {
             "开始批量上传称重记录"
         );
 
-        let retry_policy = ExponentialBackoffBuilder::new()
-            .with_initial_interval(self.sync.retry_initial_delay())
-            .with_max_interval(self.sync.retry_max_delay())
-            .with_max_elapsed_time(Some(self.sync.retry_max_elapsed()))
-            .build();
-
-        let response = backoff::future::retry_notify(
-            retry_policy,
-            || async {
-                self.upload_batch(&records)
-                    .await
-                    .map_err(UploadError::into_backoff)
-            },
-            |error: anyhow::Error, delay: std::time::Duration| {
+        let response = retry_transient(
+            self.sync.retry_initial_delay(),
+            self.sync.retry_max_delay(),
+            self.sync.retry_max_elapsed(),
+            || async { self.upload_batch(&records).await },
+            |error, delay| {
                 warn!(
                     stage = "sync.retry",
                     %error,

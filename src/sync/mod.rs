@@ -11,6 +11,7 @@
 
 pub mod engine;
 pub mod error;
+pub(crate) mod retry;
 pub mod sqlserver_engine;
 
 use serde::Serialize;

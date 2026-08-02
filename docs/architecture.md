@@ -12,7 +12,7 @@
         = 0      └──────────┬────────────┘
                               │  Vec<SqlServerWeightRecord{serial_no, data}>
                               ▼
-                    ┌─────────────────────┐    backoff retry
+                    ┌─────────────────────┐    exponential retry
                     │ sqlserver_engine.rs │ ───────────────▶  POST /weighing-data-sync/put
                     │  upload_batch()     │ ◀──────────────  (204/2xx/4xx/5xx)
                     └──────────┬──────────┘
@@ -27,7 +27,7 @@
    status IN ('pending','failed') ─▶│  db/mod.rs      │  fetch_pending()
                                    └────────┬────────┘
                                             ▼
-                                  ┌─────────────────┐   backoff retry
+                                  ┌─────────────────┐   exponential retry
                                   │  sync/engine.rs │ ────────────▶  POST /.../put
                                   │  upload_batch() │ ◀────────────
                                   └────────┬────────┘
@@ -51,7 +51,7 @@
 | `sync::error` | `UploadError`：permanent / transient 分类 |
 | `sync`（mod） | `SyncOutcome` 统一结果类型 |
 | `server` | axum HTTP 接收服务：Bearer 鉴权、空体 400、可选 `inbound_payloads` 落库 |
-| `client`（websocket 特性） | WebSocket 客户端占位 |
+| `client`（websocket 特性） | WebSocket 批量上报客户端、ACK 解析 |
 | `windows` | 注册表 Run 项自启动、Windows 服务安装/卸载（`cfg(windows)` + `windows` 特性） |
 
 ## 同步结果（SyncOutcome）
@@ -76,9 +76,9 @@ pub struct SyncOutcome {
 - `Transient`：网络错误、请求发送失败、`5xx`、`408`、`429`、（读取响应体的）I/O 错误。
 - `Permanent`：`4xx`（除 408/429）、响应反序列化失败、构建请求体失败。
 
-`UploadError::into_backoff()` 映射到 `backoff::Error::transient` / `permanent`：
-permanent 错误被 backoff 立即返回（不重试），transient 错误按指数退避重试直到预算耗尽。
-`classify` 规则在 `src/sync/error.rs`，并有单元测试覆盖。
+`sync::retry::retry_transient()` 会立即返回 permanent 错误；transient 错误按配置的
+初始延迟、最大延迟与总耗时预算做指数退避。`classify` 规则在 `src/sync/error.rs`，
+退避循环在 `src/sync/retry.rs`，两者都有单元测试覆盖。
 
 ## 写回优化
 
@@ -104,4 +104,4 @@ permanent 错误被 backoff 立即返回（不重试），transient 错误按指
 - SQL Server 表名通过 `validate_identifier` 校验（仅字母/数字/`_`/`.`），列名用 `[]` 包裹并
   转义 `]`，参数化查询，防 SQL 注入。
 - HTTP 接收服务可选 Bearer 鉴权与请求体上限。
-- 客户端用 rustls（无 OpenSSL 依赖），`reqwest` / `tiberius` 均启用 rustls。
+- HTTP/WebSocket 客户端使用 rustls；SQL Server TDS 连接通过 `tiberius` 的 `native-tls` 复用系统 TLS 能力。

@@ -10,12 +10,15 @@ license = "AGPL-3.0-only"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = true }
-backoff = { version = "0.4", features = ["tokio"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 dotenvy = "0.15"
 flate2 = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+], optional = true }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "gzip",
@@ -35,8 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiberius = { version = "0.12", default-features = false, features = [
     "chrono",
+    "native-tls",
     "rust_decimal",
-    "rustls",
     "tds73",
     "tokio",
 ] }
@@ -49,7 +52,10 @@ tokio = { version = "1", features = [
     "time",
 ] }
 tokio-cron-scheduler = { version = "0.15", optional = true }
-tokio-tungstenite = { version = "0.30", optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+], optional = true }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -60,16 +66,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 windows-service = { version = "0.8", optional = true }
 winreg = { version = "0.56", optional = true }
 
-[dev-dependencies]
-pretty_assertions = "1"
-
 [features]
 default = ["sqlite", "http", "cron"]
 compression = ["dep:flate2"]
 cron = ["dep:tokio-cron-scheduler"]
 http = []
 sqlite = []
-websocket = ["dep:tokio-tungstenite"]
+websocket = ["dep:futures-util", "dep:tokio-tungstenite"]
 windows = ["dep:windows-service", "dep:winreg"]
 
 [[bin]]

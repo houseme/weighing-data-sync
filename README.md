@@ -43,7 +43,7 @@ scripts/validate_sqlserver_e2e.sh                       # Docker SQL Server 端�
 ## 技术栈
 
 Rust Edition 2024 · tokio · axum · reqwest · SeaORM 2.0 (SQLite) · tiberius (SQL Server) ·
-config + dotenvy · clap · tokio-cron-scheduler · backoff · tracing · uom
+config + dotenvy · clap · tokio-cron-scheduler · tracing · uom
 
 ## 许可证
 

@@ -42,14 +42,6 @@ impl UploadError {
             false
         }
     }
-
-    /// Convert into a [`backoff::Error`] preserving the retry intent.
-    pub fn into_backoff(self) -> backoff::Error<AnyhowError> {
-        match self {
-            Self::Transient(error) => backoff::Error::transient(error),
-            Self::Permanent(error) => backoff::Error::permanent(error),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
+#[cfg(feature = "cron")]
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "cron")]
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
