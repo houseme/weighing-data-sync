@@ -3,7 +3,7 @@ use std::ffi::OsString;
 
 const SERVICE_NAME: &str = "WeighingDataSync";
 #[cfg(all(target_os = "windows", feature = "windows"))]
-const SERVICE_DISPLAY_NAME: &str = "Shangheng Weighing Data Sync";
+const SERVICE_DISPLAY_NAME: &str = "Intelligent Weighing Data Sync";
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub fn install_service() -> anyhow::Result<()> {

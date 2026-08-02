@@ -15,7 +15,7 @@ use weighing_data_sync::{
 
 #[derive(Debug, Parser)]
 #[command(name = "sync-daemon")]
-#[command(about = "Shangheng weighing data synchronization daemon")]
+#[command(about = "Intelligent weighing data synchronization daemon")]
 struct Cli {
     #[arg(
         short,
