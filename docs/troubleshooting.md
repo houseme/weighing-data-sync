@@ -11,8 +11,8 @@ $env:WDS__SQLSERVER__USERNAME = "sa"
 $env:WDS__SQLSERVER__PASSWORD = "现场密码"
 ```
 
-或写入部署机的 `config/default.toml`（生产建议用凭据管理器，见
-[Windows 部署 · 凭据管理](deployment-windows.md#凭据管理生产环境)）。
+或使用 Windows 安装脚本生成受 ACL 保护的 `.env`（见
+[Windows 部署 · 现场安装](deployment-windows.md#现场安装)）。
 
 只想在开发机验证流程、不连现场库时，切到本地链路：
 
@@ -72,11 +72,13 @@ sqlite3 data/weighing_sync.db 'SELECT request_id, source, records_count, receive
 - 优先修复上报失败（见上文 4xx/5xx），让队列正常消化。
 - （未来可引入高水位游标或分页 `OFFSET`，目前未实现，以保持读取语义简单。）
 
-## Windows 服务 / 自启动不生效
+## Windows 计划任务 / 自启动不生效
 
-- `install-service` 需管理员权限。
-- 自启动 Run 项写入的是 `HKCU`，仅对当前用户登录生效；服务方式更适合作业现场。
-- 服务以 `run` 参数启动；如需指定配置，参考服务安装实现或部署机配置路径。
+- `scripts/install-windows.ps1` 需要管理员权限。
+- 生产部署推荐计划任务 `WeighingDataSync`，可用 `Get-ScheduledTaskInfo -TaskName WeighingDataSync`
+  查看最近一次启动结果。
+- 确认计划任务工作目录为 `C:\Program Files\WeighingDataSync`，否则 `.env` 不会被自动加载。
+- 旧的注册表 Run 项只对当前用户登录生效，不建议作为无人值守现场的默认路径。
 
 ## 重新验证构建
 

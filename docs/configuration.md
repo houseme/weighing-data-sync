@@ -20,8 +20,8 @@ $env:WDS__API__API_KEY        = "云端 Bearer Token"
 $env:WDS__SERVER__API_KEY     = "接收服务 Bearer Token（开启鉴权时）"
 ```
 
-生产环境建议用 **Windows 凭据管理器** 或服务账号的环境变量注入，不写入磁盘配置，见
-[Windows 部署](deployment-windows.md)。
+生产环境建议用 Windows 安装脚本生成受 ACL 保护的 `.env`，或由现场配置管理系统注入服务账号
+环境变量；不要把真实密码写入仓库配置模板。见 [Windows 部署](deployment-windows.md)。
 
 ## 完整配置示例
 

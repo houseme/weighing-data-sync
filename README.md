@@ -33,7 +33,7 @@ scripts/validate_sqlserver_e2e.sh                       # Docker SQL Server 端�
 | [总览](docs/index.md) | 系统定位、目录结构、文档导航 |
 | [快速开始](docs/getting-started.md) | 构建、运行、`run` / `sync-now` / `serve`、本地验证 |
 | [配置说明](docs/configuration.md) | 全部配置项、`WDS__*` 环境变量覆盖、凭据注入、重试 / cron 调优 |
-| [Windows 部署](docs/deployment-windows.md) | 目录约定、交叉编译、服务安装 / 卸载、登录自启动、凭据管理 |
+| [Windows 部署](docs/deployment-windows.md) | EXE 打包、现场依赖、安装脚本、计划任务、SQL Server 前置确认 |
 | [HTTP 协议](docs/api-protocol.md) | 上报请求 / 响应 schema、Bearer 鉴权、204 / 空体语义 |
 | [日志与排障](docs/logging.md) | 结构化日志与 `stage` 目录、示例、排障流程 |
 | [架构](docs/architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制与 tiberius 方案 |

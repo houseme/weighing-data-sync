@@ -24,7 +24,7 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | --- | --- |
 | [快速开始](getting-started.md) | 构建、运行、子命令、本地快速验证 |
 | [配置说明](configuration.md) | 配置项逐项说明、环境变量覆盖、凭据注入、调优 |
-| [Windows 部署](deployment-windows.md) | 目录约定、交叉编译、服务、自启动、凭据管理 |
+| [Windows 部署](deployment-windows.md) | EXE 打包、现场依赖、安装脚本、计划任务、SQL Server 前置确认 |
 | [HTTP 协议](api-protocol.md) | 上报请求 / 响应、鉴权、204 / 空体语义 |
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
@@ -75,8 +75,8 @@ weighing-data-sync/
 
 - 现场凭据**不随仓库分发**：`config/default.toml` 与 `src/config.rs` 默认值均为占位符，
   未配置真实凭据时启动会给出明确错误。详见 [配置说明 · 凭据注入](configuration.md#凭据注入)。
-- 云端 API Key 与 HTTP 接收服务的 Bearer Token 通过环境变量或 Windows 凭据管理器注入，
-  不写入源码。
+- 云端 API Key 与 SQL Server 密码通过环境变量或 Windows 安装脚本生成的受限 `.env` 注入，
+  不写入源码或仓库配置模板。
 
 ## 编译与验证
 

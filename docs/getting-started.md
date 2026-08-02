@@ -20,7 +20,7 @@ cargo build --release               # 发布构建
 ```bash
 cargo build --release --features compression     # gzip 压缩上报请求体
 cargo build --release --features websocket       # WebSocket 客户端占位（见架构文档）
-cargo build --release --features windows         # Windows 服务 / 自启动（建议在 Windows 上编译）
+cargo build --release --features windows         # Windows 专用入口（现场部署见 deployment-windows.md）
 ```
 
 ## 子命令
@@ -33,7 +33,7 @@ cargo build --release --features windows         # Windows 服务 / 自启动（
 | `run`（默认） | 启动守护进程：可选启动接收服务 → 启动同步一次 → 启动 cron 调度 → 等待 Ctrl-C |
 | `serve` | 只启动 HTTP 接收服务（`[server]`） |
 | `sync-now` | 手动执行一次同步并退出 |
-| `install-service` / `uninstall-service` | 安装 / 卸载 Windows 服务（需 `windows` 特性） |
+| `install-service` / `uninstall-service` | 原生 Windows 服务注册入口（需 `windows` 特性；现场部署默认用计划任务脚本） |
 | `enable-autostart` / `disable-autostart` / `autostart-status` | 注册表 Run 项自启动管理 |
 
 ## 运行示例
