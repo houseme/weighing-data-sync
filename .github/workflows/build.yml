@@ -194,6 +194,14 @@ jobs:
           tag="${RELEASE_TAG:-manual}"
           artifact="${PACKAGE_NAME}-${tag}-${{ matrix.name }}"
           mkdir -p artifacts
+          exe="${BIN_NAME}"
+          case "${{ matrix.os }}" in
+            windows-*) exe="${BIN_NAME}.exe" ;;
+          esac
+
+          case "${{ matrix.os }}" in
+            windows-*) cp "dist/${artifact}/${exe}" "artifacts/${artifact}.exe" ;;
+          esac
 
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             (cd dist && 7z a "../artifacts/${artifact}.zip" "${artifact}" >/dev/null)

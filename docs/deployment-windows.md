@@ -22,6 +22,9 @@ SQL Server 服务，本项目只部署同步程序：从本机或局域网 SQL S
 .\scripts\build-windows-release.ps1 -StaticCrt
 ```
 
+GitHub Actions 的 `build.yml` 在 Windows 构建时会同时上传完整 `.zip` 部署包和独立
+`.exe` 二进制文件，独立文件名形如 `weighing-data-sync-v0.1.0-windows-x86_64.exe`。
+
 输出目录：
 
 ```text
