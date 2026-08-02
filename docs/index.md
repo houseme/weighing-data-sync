@@ -29,6 +29,7 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
 | [SQL Server Docker E2E](sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
+| [SQL Server 转 MySQL SQL](sqlserver_to_mysql.sql) | 将 SQL Server 样本源表 DDL / DML 转为 MySQL 8.0 可执行脚本 |
 | [常见问题](troubleshooting.md) | 连接失败、4xx、占位符凭据、队头阻塞 |
 
 ## 项目目录结构
