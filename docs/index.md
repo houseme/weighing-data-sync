@@ -28,6 +28,8 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | [HTTP 协议](api-protocol.md) | 上报请求 / 响应、鉴权、204 / 空体语义 |
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
+| [功能全景与实现清单](features.md) | 当前项目所有功能、入口、数据流、边界和验证现状 |
+| [Go SQLite 接收服务](../go-receiver/README.md) | 独立 Go module：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
 | [SQL Server Docker E2E](sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [SQL Server 转 MySQL SQL](sqlserver_to_mysql.sql) | 将 SQL Server 样本源表 DDL / DML 转为 MySQL 8.0 可执行脚本 |
 | [常见问题](troubleshooting.md) | 连接失败、4xx、占位符凭据、队头阻塞 |

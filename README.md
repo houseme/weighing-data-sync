@@ -37,6 +37,8 @@ scripts/validate_sqlserver_e2e.sh                       # Docker SQL Server 端�
 | [HTTP 协议](docs/api-protocol.md) | 上报请求 / 响应 schema、Bearer 鉴权、204 / 空体语义 |
 | [日志与排障](docs/logging.md) | 结构化日志与 `stage` 目录、示例、排障流程 |
 | [架构](docs/architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制与 tiberius 方案 |
+| [功能全景与实现清单](docs/features.md) | 当前所有功能、数据流、边界和验证现状 |
+| [Go SQLite 接收服务](go-receiver/README.md) | 独立 Go 服务：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
 | [SQL Server Docker E2E](docs/sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [常见问题](docs/troubleshooting.md) | SQL Server 连接失败、云端 4xx、占位符凭据、队头阻塞 |
 

@@ -84,10 +84,13 @@ Content-Type: application/json
 
 ## 客户端处理约定
 
-- **204 No Content** 或**空响应体** → 视为整批成功。
-- **2xx 且有响应体** → 解析 `accepted_serial_nos` / `failed_serial_nos`：
+- **204 No Content** → 两条链路都视为整批成功。
+- **SQL Server 链路的 2xx 空响应体** → 视为整批成功；**本地 SQLite 链路的 2xx 空响应体**会尝试 JSON 解码，解码失败并按永久错误处理，因此接收端应使用 `204` 表示无响应体成功。
+- **2xx 且有响应体** → 解析对应链路的确认字段（本地为 `accepted_ids` / `failed_ids`，SQL Server
+  为 `accepted_serial_nos` / `failed_serial_nos`）：
   - 全部为空时按整批成功处理；
-  - 否则仅对 `accepted_serial_nos` 执行回写，`failed_serial_nos` 计入失败。
+  - 否则仅将对应的 accepted 集合标记成功、failed 集合计入失败；SQL Server 链路对 accepted
+    流水号执行源表回写。
 - **4xx（除 408/429）** → 永久失败，立即放弃，不重试。
 - **5xx / 408 / 429 / 网络错误** → transient，按指数退避重试，直到预算耗尽。
 - 成功且 `mark_uploaded = true` 时，对 SQL Server 链路执行参数化批量回写：
