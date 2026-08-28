@@ -6,7 +6,7 @@ It uses the pure-Go `github.com/go-sql-driver/mysql` driver and the standard-lib
 
 ## Delivery guarantee
 
-The business-record upsert and insert into `wds_c_delete_queue` share one MySQL transaction. A crash before commit leaves neither durable; a crash after commit leaves a durable cleanup job. Re-fetching is safe because `record_key` is unique in both tables. Delete failures retry with exponential backoff from 1 to 128 seconds.
+The raw-record upsert, typed business-table upsert, and insert into `wds_c_delete_queue` share one MySQL transaction. A crash before commit leaves neither durable; a crash after commit leaves a durable cleanup job. Re-fetching is safe because `record_key` is unique in all replicated tables. Delete failures retry with exponential backoff from 1 to 128 seconds.
 
 ## Run
 
@@ -61,5 +61,7 @@ Query values are sorted and URL-escaped; `signature` and `sign` are excluded. GE
 
 ## Local tables
 
-- `wds_replicated_records` contains the full raw record JSON, keyed by `record_key`.
+- `wds_replicated_records` contains the full raw record JSON, keyed by `record_key`, with `entity_type` identifying `weight_info` or `weight_photo`.
+- `wds_weight_info_records` contains the fields from `tbl_weightInfo`, including serial number, plate number, goods, weight values, fee/amount fields, timestamps, backup fields, finish/cancel/delete flags, and raw JSON.
+- `wds_weight_photo_records` contains the fields from `tbl_weightPhoto`, including source image id, `serialNo`, base64 `captureImage`, plate number, image type, upload/delete flags, client id, consignee unit, forwarding unit, and raw JSON.
 - `wds_c_delete_queue` is the durable cleanup outbox. Rows with `status='failed'` retain the latest error and are retried automatically.

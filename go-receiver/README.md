@@ -4,12 +4,12 @@
 
 ## 功能
 
-- `POST /weighing-data-sync/put`：接收批量 JSON，上报体兼容现有 Rust 同步协议。
-- `GET /weighing-data-sync/records`：按 `id` / `record_key` / `plateNo` / `serialNo` / `from` / `to` 查询。
+- `POST /weighing-data-sync/put`：接收批量 JSON，上报体兼容现有 Rust 同步协议，也支持新的 `weight_info_records` / `weight_photo_records` 双实体 payload。
+- `GET /weighing-data-sync/records`：按 `id` / `record_key` / `entity_type` / `plateNo` / `serialNo` / `from` / `to` 查询。
 - `DELETE /weighing-data-sync/records/{id}`：B 机器按 SQLite 自增 `id` 清理单条记录。
 - `DELETE /weighing-data-sync/records/by-key/{record_key}`：B 机器按业务唯一标识清理单条记录。
 - `DELETE /weighing-data-sync/records?id=...` 或 `?record_key=...`：兼容 query 形式清理。
-- SQLite 幂等落库：表内都有 `INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id >= 0)` 自增 `id`；业务幂等优先使用 `serialNo`，没有 `serialNo` 时退化使用来源 `id` 或 `ticket_no`。
+- SQLite 幂等落库：表内都有 `INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id >= 0)` 自增 `id`；称重信息使用 `weight_info:<serialNo>`，称重图片使用 `weight_photo:<id>` 作为业务幂等键。
 - 最小存储：默认只保存查询/清理必要字段，不保存完整原始记录和完整批次 payload；需要审计时可显式打开。
 - 鉴权分权：A 写入、B 查询、B 清理分别配置 Bearer Token 和 HMAC-SHA256 签名密钥，默认要求两者同时存在。
 - 自动建表：默认启动时创建 `wds_receive_records` 和 `wds_receive_batches`。
@@ -67,11 +67,10 @@ curl -sS -X POST 'http://127.0.0.1:18081/weighing-data-sync/put' \
   -H 'X-Signature: <hex-hmac-signature>' \
   -H 'Content-Type: application/json' \
   -d '{
-    "source": "sqlserver-yunfu-tbl_weightInfo",
-    "database": "yunfu",
-    "table": "tbl_weightInfo",
+    "source": "sqlserver-shweight",
+    "database": "shweight",
     "uploaded_at": "2026-07-28T08:00:00Z",
-    "records": [
+    "weight_info_records": [
       {
         "serialNo": "202607280001",
         "plateNo": "皖H12345",
@@ -79,6 +78,15 @@ curl -sS -X POST 'http://127.0.0.1:18081/weighing-data-sync/put' \
         "tareWeight": "5000.00",
         "netWeight": "7500.00",
         "updateTime": "2026-07-28 08:10:30"
+      }
+    ],
+    "weight_photo_records": [
+      {
+        "id": 1001,
+        "serialNo": "202607280001",
+        "plateNumber": "皖H12345",
+        "imageType": "gross1",
+        "captureImage": "<base64-image>"
       }
     ]
   }'
@@ -89,9 +97,12 @@ curl -sS -X POST 'http://127.0.0.1:18081/weighing-data-sync/put' \
 ```json
 {
   "accepted": true,
+  "accepted_record_keys": ["weight_info:202607280001", "weight_photo:1001"],
   "accepted_serial_nos": ["202607280001"],
   "failed_serial_nos": [],
-  "records_count": 1
+  "records_count": 2,
+  "weight_info_count": 1,
+  "weight_photo_count": 1
 }
 ```
 
@@ -179,7 +190,7 @@ signature := hex.EncodeToString(mac.Sum(nil))
 
 服务使用两张表：
 
-- `wds_receive_records`：每条称重记录一行，`id` 为非负自增主键，`record_key` 为唯一业务幂等键；抽取 `serial_no`、`plate_no`、`source_time` 用于查询；`raw_record` 默认为空，仅在 `STORE_RAW_RECORDS=true` 时保存。
+- `wds_receive_records`：每条称重信息或图片记录一行，`id` 为非负自增主键，`record_key` 为唯一业务幂等键，`entity_type` 区分 `weight_info` / `weight_photo`；抽取 `serial_no`、`plate_no`、`source_time` 用于查询；`raw_record` 默认为空，仅在 `STORE_RAW_RECORDS=true` 时保存。
 - `wds_receive_batches`：每次 POST 请求一行，`id` 为非负自增主键，`request_id` 为唯一请求键，用于追踪批次、来源和数量；`raw_payload` 默认为空，仅在 `STORE_RAW_PAYLOAD=true` 时保存。
 
 建表 SQL 见 [migrations/001_init.sql](migrations/001_init.sql)。

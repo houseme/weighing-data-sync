@@ -70,16 +70,19 @@ type server struct {
 }
 
 type uploadPayload struct {
-	Source     string           `json:"source"`
-	Database   string           `json:"database"`
-	Table      string           `json:"table"`
-	UploadedAt any              `json:"uploaded_at"`
-	Records    []map[string]any `json:"records"`
+	Source             string           `json:"source"`
+	Database           string           `json:"database"`
+	Table              string           `json:"table"`
+	UploadedAt         any              `json:"uploaded_at"`
+	Records            []map[string]any `json:"records"`
+	WeightInfoRecords  []map[string]any `json:"weight_info_records"`
+	WeightPhotoRecords []map[string]any `json:"weight_photo_records"`
 }
 
 type recordRow struct {
 	ID             int64
 	RecordKey      string
+	EntityType     string
 	KeyType        string
 	SerialNo       sql.NullString
 	PlateNo        sql.NullString
@@ -95,6 +98,54 @@ type recordRow struct {
 type nonceStore struct {
 	mu    sync.Mutex
 	items map[string]time.Time
+}
+
+type entityRecordBatch struct {
+	entityType  string
+	sourceTable string
+	records     []map[string]any
+}
+
+type entityRecordBatches []entityRecordBatch
+
+func (b entityRecordBatches) total() int {
+	total := 0
+	for _, batch := range b {
+		total += len(batch.records)
+	}
+	return total
+}
+
+func (p uploadPayload) normalizedWeightInfo() []map[string]any {
+	if len(p.WeightInfoRecords) > 0 {
+		return p.WeightInfoRecords
+	}
+	return p.Records
+}
+
+func (p uploadPayload) entityRecords() entityRecordBatches {
+	return entityRecordBatches{
+		{entityType: "weight_info", sourceTable: "tbl_weightInfo", records: p.normalizedWeightInfo()},
+		{entityType: "weight_photo", sourceTable: "tbl_weightPhoto", records: p.WeightPhotoRecords},
+	}
+}
+
+func acceptedWeightInfoSerials(payload uploadPayload, acceptedKeys []string) []string {
+	keySet := map[string]struct{}{}
+	for _, key := range acceptedKeys {
+		keySet[key] = struct{}{}
+	}
+	serials := make([]string, 0)
+	for _, record := range payload.normalizedWeightInfo() {
+		_, rawKey := extractRecordKey("weight_info", record)
+		if _, ok := keySet["weight_info:"+rawKey]; !ok {
+			continue
+		}
+		if serial := extractString(record, "serialNo", "serial_no"); serial != "" {
+			serials = append(serials, serial)
+		}
+	}
+	return serials
 }
 
 func main() {
@@ -296,7 +347,8 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if len(payload.Records) == 0 {
+	entities := payload.entityRecords()
+	if entities.total() == 0 {
 		writeError(w, http.StatusBadRequest, "records is missing or empty")
 		return
 	}
@@ -312,14 +364,19 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "sqlite write failed")
 		return
 	}
+	acceptedSerials := acceptedWeightInfoSerials(payload, accepted)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"request_id":          requestID,
-		"accepted":            len(failed) == 0,
-		"accepted_serial_nos": accepted,
-		"failed_serial_nos":   failed,
-		"records_count":       len(payload.Records),
-		"received_at":         time.Now().UTC().Format(time.RFC3339Nano),
+		"request_id":           requestID,
+		"accepted":             len(failed) == 0,
+		"accepted_record_keys": accepted,
+		"failed_record_keys":   failed,
+		"accepted_serial_nos":  acceptedSerials,
+		"failed_serial_nos":    []string{},
+		"records_count":        entities.total(),
+		"weight_info_count":    len(payload.normalizedWeightInfo()),
+		"weight_photo_count":   len(payload.WeightPhotoRecords),
+		"received_at":          time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -338,14 +395,15 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	limit := parseBoundedInt(q.Get("limit"), s.cfg.defaultLimit, 1, s.cfg.maxLimit)
 	offset := parseBoundedInt(q.Get("offset"), 0, 0, 1_000_000)
 	filter := queryFilter{
-		ID:        id,
-		RecordKey: firstNonEmpty(q.Get("record_key"), q.Get("recordKey"), q.Get("key")),
-		SerialNo:  firstNonEmpty(q.Get("serialNo"), q.Get("serial_no")),
-		PlateNo:   firstNonEmpty(q.Get("plateNo"), q.Get("plate_no"), q.Get("plate")),
-		From:      parseQueryTime(q.Get("from")),
-		To:        parseQueryTime(q.Get("to")),
-		Limit:     limit,
-		Offset:    offset,
+		ID:         id,
+		RecordKey:  firstNonEmpty(q.Get("record_key"), q.Get("recordKey"), q.Get("key")),
+		EntityType: firstNonEmpty(q.Get("entity_type"), q.Get("entityType")),
+		SerialNo:   firstNonEmpty(q.Get("serialNo"), q.Get("serial_no")),
+		PlateNo:    firstNonEmpty(q.Get("plateNo"), q.Get("plate_no"), q.Get("plate")),
+		From:       parseQueryTime(q.Get("from")),
+		To:         parseQueryTime(q.Get("to")),
+		Limit:      limit,
+		Offset:     offset,
 	}
 
 	rows, err := s.queryRecords(r.Context(), filter)
@@ -360,6 +418,7 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		item := map[string]any{
 			"id":          row.ID,
 			"record_key":  row.RecordKey,
+			"entity_type": row.EntityType,
 			"key_type":    row.KeyType,
 			"ingested_at": row.IngestedAt,
 		}
@@ -468,7 +527,8 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 
 	source := fallback(payload.Source, "unknown")
 	database := fallback(payload.Database, "unknown")
-	table := fallback(payload.Table, "unknown")
+	table := fallback(payload.Table, "multiple")
+	entities := payload.entityRecords()
 	var rawPayload any
 	if s.cfg.storeRawPayload {
 		encoded, _ := json.Marshal(payload)
@@ -485,23 +545,25 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 			failed_count = excluded.failed_count,
 			uploaded_at = excluded.uploaded_at,
 			raw_payload = excluded.raw_payload
-	`, requestID, source, database, table, len(payload.Records), len(payload.Records), nullableTimeString(uploadedAt), rawPayload); err != nil {
+	`, requestID, source, database, table, entities.total(), entities.total(), nullableTimeString(uploadedAt), rawPayload); err != nil {
 		return nil, nil, err
 	}
 
-	accepted := make([]string, 0, len(payload.Records))
+	accepted := make([]string, 0, entities.total())
 	failed := make([]string, 0)
-	for start := 0; start < len(payload.Records); start += insertChunkSize {
-		end := start + insertChunkSize
-		if end > len(payload.Records) {
-			end = len(payload.Records)
+	for _, batch := range entities {
+		for start := 0; start < len(batch.records); start += insertChunkSize {
+			end := start + insertChunkSize
+			if end > len(batch.records) {
+				end = len(batch.records)
+			}
+			chunkAccepted, chunkFailed, err := upsertRecords(ctx, tx, batch.entityType, batch.sourceTable, batch.records[start:end], source, database, uploadedAt, s.cfg.storeRawRecords)
+			if err != nil {
+				return nil, nil, err
+			}
+			accepted = append(accepted, chunkAccepted...)
+			failed = append(failed, chunkFailed...)
 		}
-		chunkAccepted, chunkFailed, err := upsertRecords(ctx, tx, payload.Records[start:end], source, database, table, uploadedAt, s.cfg.storeRawRecords)
-		if err != nil {
-			return nil, nil, err
-		}
-		accepted = append(accepted, chunkAccepted...)
-		failed = append(failed, chunkFailed...)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -518,7 +580,7 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 	return accepted, failed, nil
 }
 
-func upsertRecords(ctx context.Context, tx *sql.Tx, records []map[string]any, source, database, table string, uploadedAt *time.Time, storeRaw bool) ([]string, []string, error) {
+func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, records []map[string]any, source, database string, uploadedAt *time.Time, storeRaw bool) ([]string, []string, error) {
 	var (
 		values   []string
 		args     []any
@@ -527,8 +589,9 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, records []map[string]any, so
 	)
 
 	for _, record := range records {
-		keyType, key := extractRecordKey(record)
-		if key == "" {
+		keyType, rawKey := extractRecordKey(entityType, record)
+		key := entityType + ":" + rawKey
+		if rawKey == "" {
 			failed = append(failed, "")
 			continue
 		}
@@ -554,9 +617,10 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, records []map[string]any, so
 			rawRecord = string(encoded)
 		}
 
-		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			key,
+			entityType,
 			keyType,
 			nullableString(serialNo),
 			nullableString(plateNo),
@@ -576,9 +640,10 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, records []map[string]any, so
 
 	stmt := `
 		INSERT INTO wds_receive_records
-			(record_key, key_type, serial_no, plate_no, source_time, source, source_database, source_table, uploaded_at, raw_record)
+			(record_key, entity_type, key_type, serial_no, plate_no, source_time, source, source_database, source_table, uploaded_at, raw_record)
 		VALUES ` + strings.Join(values, ",") + `
 		ON CONFLICT(record_key) DO UPDATE SET
+			entity_type = excluded.entity_type,
 			key_type = excluded.key_type,
 			serial_no = excluded.serial_no,
 			plate_no = excluded.plate_no,
@@ -597,14 +662,15 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, records []map[string]any, so
 }
 
 type queryFilter struct {
-	ID        int64
-	RecordKey string
-	SerialNo  string
-	PlateNo   string
-	From      *time.Time
-	To        *time.Time
-	Limit     int
-	Offset    int
+	ID         int64
+	RecordKey  string
+	EntityType string
+	SerialNo   string
+	PlateNo    string
+	From       *time.Time
+	To         *time.Time
+	Limit      int
+	Offset     int
 }
 
 func (s *server) queryRecords(ctx context.Context, filter queryFilter) ([]recordRow, error) {
@@ -617,6 +683,10 @@ func (s *server) queryRecords(ctx context.Context, filter queryFilter) ([]record
 	if filter.RecordKey != "" {
 		where = append(where, "record_key = ?")
 		args = append(args, filter.RecordKey)
+	}
+	if filter.EntityType != "" {
+		where = append(where, "entity_type = ?")
+		args = append(args, filter.EntityType)
 	}
 	if filter.SerialNo != "" {
 		where = append(where, "serial_no = ?")
@@ -637,7 +707,7 @@ func (s *server) queryRecords(ctx context.Context, filter queryFilter) ([]record
 	args = append(args, filter.Limit, filter.Offset)
 
 	query := `
-		SELECT id, record_key, key_type, serial_no, plate_no, source_time, source,
+		SELECT id, record_key, entity_type, key_type, serial_no, plate_no, source_time, source,
 		       source_database, source_table, uploaded_at, ingested_at, raw_record
 		FROM wds_receive_records
 		WHERE ` + strings.Join(where, " AND ") + `
@@ -657,6 +727,7 @@ func (s *server) queryRecords(ctx context.Context, filter queryFilter) ([]record
 		if err := sqlRows.Scan(
 			&row.ID,
 			&row.RecordKey,
+			&row.EntityType,
 			&row.KeyType,
 			&row.SerialNo,
 			&row.PlateNo,
@@ -803,8 +874,11 @@ func readBody(r *http.Request, maxBytes int64) ([]byte, error) {
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
-	for _, stmt := range []string{createRecordsTableSQL, createRecordsPlateTimeIndexSQL, createRecordsSerialNoIndexSQL, createRecordsSourceTimeIndexSQL, createBatchesTableSQL, createBatchesSourceTimeIndexSQL} {
+	for _, stmt := range []string{createRecordsTableSQL, addRecordsEntityTypeColumnSQL, createRecordsEntityTypeIndexSQL, createRecordsPlateTimeIndexSQL, createRecordsSerialNoIndexSQL, createRecordsSourceTimeIndexSQL, createBatchesTableSQL, createBatchesSourceTimeIndexSQL} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
 			return err
 		}
 	}
@@ -815,6 +889,7 @@ const createRecordsTableSQL = `
 CREATE TABLE IF NOT EXISTS wds_receive_records (
   id integer PRIMARY KEY AUTOINCREMENT CHECK (id >= 0),
   record_key text NOT NULL,
+  entity_type text NOT NULL DEFAULT 'weight_info',
   key_type text NOT NULL,
   serial_no text,
   plate_no text,
@@ -828,6 +903,16 @@ CREATE TABLE IF NOT EXISTS wds_receive_records (
   cloud_updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   UNIQUE (record_key)
 )
+`
+
+const addRecordsEntityTypeColumnSQL = `
+ALTER TABLE wds_receive_records
+ADD COLUMN entity_type text NOT NULL DEFAULT 'weight_info'
+`
+
+const createRecordsEntityTypeIndexSQL = `
+CREATE INDEX IF NOT EXISTS idx_wds_receive_entity_type
+ON wds_receive_records (entity_type, ingested_at, record_key)
 `
 
 const createRecordsPlateTimeIndexSQL = `
@@ -867,15 +952,30 @@ CREATE INDEX IF NOT EXISTS idx_wds_receive_batch_source_time
 ON wds_receive_batches (source_database, source_table, received_at)
 `
 
-func extractRecordKey(record map[string]any) (string, string) {
-	for _, candidate := range []struct {
+func extractRecordKey(entityType string, record map[string]any) (string, string) {
+	candidates := []struct {
 		keyType string
 		keys    []string
-	}{
-		{"serialNo", []string{"serialNo", "serial_no"}},
-		{"id", []string{"id"}},
-		{"ticket_no", []string{"ticket_no", "ticketNo"}},
-	} {
+	}{}
+	if entityType == "weight_photo" {
+		candidates = []struct {
+			keyType string
+			keys    []string
+		}{
+			{"id", []string{"id"}},
+			{"serialNo", []string{"serialNo", "serial_no"}},
+		}
+	} else {
+		candidates = []struct {
+			keyType string
+			keys    []string
+		}{
+			{"serialNo", []string{"serialNo", "serial_no"}},
+			{"id", []string{"id"}},
+			{"ticket_no", []string{"ticket_no", "ticketNo"}},
+		}
+	}
+	for _, candidate := range candidates {
 		if value := extractString(record, candidate.keys...); value != "" {
 			return candidate.keyType, value
 		}

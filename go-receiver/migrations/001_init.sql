@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS wds_receive_records (
   id integer PRIMARY KEY AUTOINCREMENT CHECK (id >= 0),
   record_key text NOT NULL,
+  entity_type text NOT NULL DEFAULT 'weight_info',
   key_type text NOT NULL,
   serial_no text,
   plate_no text,
@@ -17,6 +18,9 @@ CREATE TABLE IF NOT EXISTS wds_receive_records (
 
 CREATE INDEX IF NOT EXISTS idx_wds_receive_plate_time
 ON wds_receive_records (plate_no, source_time, record_key);
+
+CREATE INDEX IF NOT EXISTS idx_wds_receive_entity_type
+ON wds_receive_records (entity_type, ingested_at, record_key);
 
 CREATE INDEX IF NOT EXISTS idx_wds_receive_serial_no
 ON wds_receive_records (serial_no);

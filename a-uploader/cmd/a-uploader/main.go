@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,31 +30,37 @@ import (
 )
 
 const defaultPendingWhere = "ISNULL([isUploadCloud], 0) = 0 AND ISNULL([del_flag], 0) = 0"
+const defaultPhotoPendingWhere = "ISNULL([isUploadCloud], 0) = 0 AND ISNULL([delFlag], 0) = 0"
 
 type config struct {
-	endpoint                                                                                               *url.URL
-	token, secret, dsn, database, schema, table, primaryKey, serialColumn, pendingWhere, stateFile, source string
-	batchSize                                                                                              int
-	poll, timeout                                                                                          time.Duration
-	runOnce                                                                                                bool
+	endpoint *url.URL
+	token, secret, dsn, database, schema, infoTable, photoTable, infoPrimaryKey, photoPrimaryKey,
+	infoSerialColumn, photoSerialColumn, infoPendingWhere, photoPendingWhere, stateFile, source string
+	batchSize     int
+	poll, timeout time.Duration
+	runOnce       bool
 }
 type uploadPayload struct {
-	Source     string           `json:"source"`
-	Database   string           `json:"database"`
-	Table      string           `json:"table"`
-	UploadedAt string           `json:"uploaded_at"`
-	Records    []map[string]any `json:"records"`
+	Source             string           `json:"source"`
+	Database           string           `json:"database"`
+	UploadedAt         string           `json:"uploaded_at"`
+	WeightInfoRecords  []map[string]any `json:"weight_info_records,omitempty"`
+	WeightPhotoRecords []map[string]any `json:"weight_photo_records,omitempty"`
 }
 type uploadResponse struct {
-	Accepted []string `json:"accepted_serial_nos"`
-	Failed   []string `json:"failed_serial_nos"`
+	AcceptedRecordKeys []string `json:"accepted_record_keys"`
+	FailedRecordKeys   []string `json:"failed_record_keys"`
+	Accepted           []string `json:"accepted_serial_nos"`
+	Failed             []string `json:"failed_serial_nos"`
 }
 type sourceRecord struct {
-	pk, serial string
-	data       map[string]any
+	entityType, pk, recordKey, serial string
+	data                              map[string]any
 }
 type stateEntry struct {
+	EntityType string `json:"entity_type,omitempty"`
 	PrimaryKey string `json:"primary_key"`
+	RecordKey  string `json:"record_key,omitempty"`
 	SerialNo   string `json:"serial_no,omitempty"`
 	AcceptedAt string `json:"accepted_at"`
 }
@@ -126,9 +133,31 @@ func loadConfig() (config, error) {
 	if database == "" {
 		return config{}, errors.New("SQLSERVER_DATABASE is required")
 	}
-	table := env("SQLSERVER_TABLE", "tbl_weightInfo")
-	cfg := config{endpoint: endpoint, token: token, secret: secret, dsn: buildDSN(), database: database, schema: env("SQLSERVER_SCHEMA", "dbo"), table: table, primaryKey: env("SQLSERVER_PRIMARY_KEY", "serialNo"), serialColumn: env("SQLSERVER_SERIAL_COLUMN", "serialNo"), pendingWhere: env("SQLSERVER_PENDING_WHERE", defaultPendingWhere), stateFile: env("STATE_FILE", "data/a-uploader-state.jsonl"), source: env("SOURCE_NAME", "sqlserver-"+database+"-"+table), batchSize: envInt("BATCH_SIZE", 100), poll: seconds("POLL_INTERVAL_SECONDS", 30), timeout: seconds("HTTP_TIMEOUT_SECONDS", 30), runOnce: envBool("RUN_ONCE", false)}
-	for _, name := range []string{cfg.schema, cfg.table, cfg.primaryKey, cfg.serialColumn} {
+	infoTable := env("SQLSERVER_INFO_TABLE", env("SQLSERVER_TABLE", "tbl_weightInfo"))
+	photoTable := env("SQLSERVER_PHOTO_TABLE", "tbl_weightPhoto")
+	cfg := config{
+		endpoint:          endpoint,
+		token:             token,
+		secret:            secret,
+		dsn:               buildDSN(),
+		database:          database,
+		schema:            env("SQLSERVER_SCHEMA", "dbo"),
+		infoTable:         infoTable,
+		photoTable:        photoTable,
+		infoPrimaryKey:    env("SQLSERVER_INFO_PRIMARY_KEY", env("SQLSERVER_PRIMARY_KEY", "serialNo")),
+		photoPrimaryKey:   env("SQLSERVER_PHOTO_PRIMARY_KEY", "id"),
+		infoSerialColumn:  env("SQLSERVER_INFO_SERIAL_COLUMN", env("SQLSERVER_SERIAL_COLUMN", "serialNo")),
+		photoSerialColumn: env("SQLSERVER_PHOTO_SERIAL_COLUMN", "serialNo"),
+		infoPendingWhere:  env("SQLSERVER_INFO_PENDING_WHERE", env("SQLSERVER_PENDING_WHERE", defaultPendingWhere)),
+		photoPendingWhere: env("SQLSERVER_PHOTO_PENDING_WHERE", defaultPhotoPendingWhere),
+		stateFile:         env("STATE_FILE", "data/a-uploader-state.jsonl"),
+		source:            env("SOURCE_NAME", "sqlserver-"+database),
+		batchSize:         envInt("BATCH_SIZE", 100),
+		poll:              seconds("POLL_INTERVAL_SECONDS", 30),
+		timeout:           seconds("HTTP_TIMEOUT_SECONDS", 30),
+		runOnce:           envBool("RUN_ONCE", false),
+	}
+	for _, name := range []string{cfg.schema, cfg.infoTable, cfg.photoTable, cfg.infoPrimaryKey, cfg.photoPrimaryKey, cfg.infoSerialColumn, cfg.photoSerialColumn} {
 		if !identifier(name) {
 			return config{}, fmt.Errorf("invalid SQL Server identifier: %q", name)
 		}
@@ -136,8 +165,11 @@ func loadConfig() (config, error) {
 	if cfg.batchSize < 1 || cfg.poll < time.Second || cfg.timeout < time.Second {
 		return config{}, errors.New("batch size and timeout settings must be positive")
 	}
-	if strings.TrimSpace(cfg.pendingWhere) == "" || strings.Contains(cfg.pendingWhere, ";") {
-		return config{}, errors.New("SQLSERVER_PENDING_WHERE must be a non-empty single SQL expression")
+	if invalidWhere(cfg.infoPendingWhere) {
+		return config{}, errors.New("SQLSERVER_INFO_PENDING_WHERE must be a non-empty single SQL expression")
+	}
+	if invalidWhere(cfg.photoPendingWhere) {
+		return config{}, errors.New("SQLSERVER_PHOTO_PENDING_WHERE must be a non-empty single SQL expression")
 	}
 	return cfg, nil
 }
@@ -162,13 +194,13 @@ func buildDSN() string {
 func (u *uploader) syncOnce(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, u.cfg.timeout)
 	defer cancel()
-	records, err := u.fetch(ctx)
+	records, err := u.fetchAll(ctx)
 	if err != nil {
 		return err
 	}
 	pending := make([]sourceRecord, 0, len(records))
 	for _, record := range records {
-		if !u.state.contains(record.pk) {
+		if !u.state.contains(record.entityType, record.pk) {
 			pending = append(pending, record)
 		}
 	}
@@ -176,11 +208,17 @@ func (u *uploader) syncOnce(parent context.Context) error {
 		log.Printf("no unconfirmed SQL Server records")
 		return nil
 	}
-	bodyRecords := make([]map[string]any, 0, len(pending))
+	infoRecords := make([]map[string]any, 0)
+	photoRecords := make([]map[string]any, 0)
 	for _, record := range pending {
-		bodyRecords = append(bodyRecords, record.data)
+		switch record.entityType {
+		case "weight_photo":
+			photoRecords = append(photoRecords, record.data)
+		default:
+			infoRecords = append(infoRecords, record.data)
+		}
 	}
-	response, err := u.post(ctx, bodyRecords)
+	response, err := u.post(ctx, infoRecords, photoRecords)
 	if err != nil {
 		return err
 	}
@@ -191,20 +229,32 @@ func (u *uploader) syncOnce(parent context.Context) error {
 	entries := make([]stateEntry, 0, len(accepted))
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, record := range accepted {
-		entries = append(entries, stateEntry{PrimaryKey: record.pk, SerialNo: record.serial, AcceptedAt: now})
+		entries = append(entries, stateEntry{EntityType: record.entityType, PrimaryKey: record.pk, RecordKey: record.recordKey, SerialNo: record.serial, AcceptedAt: now})
 	}
 	if err := u.state.append(entries); err != nil {
 		return fmt.Errorf("C accepted %d records but state append failed: %w", len(entries), err)
 	}
-	log.Printf("submitted=%d accepted=%d failed=%d", len(pending), len(entries), len(response.Failed))
+	log.Printf("submitted=%d accepted=%d failed=%d", len(pending), len(entries), len(response.FailedRecordKeys)+len(response.Failed))
 	return nil
 }
 
-func (u *uploader) fetch(ctx context.Context) ([]sourceRecord, error) {
-	query := fmt.Sprintf("SELECT TOP (@p1) * FROM %s WHERE %s ORDER BY %s ASC", qualified(u.cfg.schema, u.cfg.table), u.cfg.pendingWhere, quote(u.cfg.primaryKey))
+func (u *uploader) fetchAll(ctx context.Context) ([]sourceRecord, error) {
+	infoRecords, err := u.fetchEntity(ctx, "weight_info", u.cfg.infoTable, u.cfg.infoPrimaryKey, u.cfg.infoSerialColumn, u.cfg.infoPendingWhere)
+	if err != nil {
+		return nil, err
+	}
+	photoRecords, err := u.fetchEntity(ctx, "weight_photo", u.cfg.photoTable, u.cfg.photoPrimaryKey, u.cfg.photoSerialColumn, u.cfg.photoPendingWhere)
+	if err != nil {
+		return nil, err
+	}
+	return append(infoRecords, photoRecords...), nil
+}
+
+func (u *uploader) fetchEntity(ctx context.Context, entityType, table, primaryKey, serialColumn, pendingWhere string) ([]sourceRecord, error) {
+	query := fmt.Sprintf("SELECT TOP (@p1) * FROM %s WHERE %s ORDER BY %s ASC", qualified(u.cfg.schema, table), pendingWhere, quote(primaryKey))
 	rows, err := u.db.QueryContext(ctx, query, sql.Named("p1", u.cfg.batchSize))
 	if err != nil {
-		return nil, fmt.Errorf("query SQL Server: %w", err)
+		return nil, fmt.Errorf("query SQL Server %s: %w", table, err)
 	}
 	defer rows.Close()
 	columns, err := rows.Columns()
@@ -228,17 +278,17 @@ func (u *uploader) fetch(ctx context.Context) ([]sourceRecord, error) {
 		for i, column := range columns {
 			data[column] = toJSON(values[i], types[i].DatabaseTypeName())
 		}
-		pk, serial := stringValue(data[u.cfg.primaryKey]), stringValue(data[u.cfg.serialColumn])
+		pk, serial := stringValue(data[primaryKey]), stringValue(data[serialColumn])
 		if pk == "" || serial == "" {
-			return nil, fmt.Errorf("row has an empty %s or %s", u.cfg.primaryKey, u.cfg.serialColumn)
+			return nil, fmt.Errorf("%s row has an empty %s or %s", table, primaryKey, serialColumn)
 		}
-		result = append(result, sourceRecord{pk: pk, serial: serial, data: data})
+		result = append(result, sourceRecord{entityType: entityType, pk: pk, serial: serial, recordKey: entityType + ":" + pk, data: data})
 	}
 	return result, rows.Err()
 }
 
-func (u *uploader) post(ctx context.Context, records []map[string]any) (uploadResponse, error) {
-	body, err := json.Marshal(uploadPayload{Source: u.cfg.source, Database: u.cfg.database, Table: u.cfg.table, UploadedAt: time.Now().UTC().Format(time.RFC3339Nano), Records: records})
+func (u *uploader) post(ctx context.Context, infoRecords, photoRecords []map[string]any) (uploadResponse, error) {
+	body, err := json.Marshal(uploadPayload{Source: u.cfg.source, Database: u.cfg.database, UploadedAt: time.Now().UTC().Format(time.RFC3339Nano), WeightInfoRecords: infoRecords, WeightPhotoRecords: photoRecords})
 	if err != nil {
 		return uploadResponse{}, err
 	}
@@ -279,16 +329,27 @@ func (u *uploader) post(ctx context.Context, records []map[string]any) (uploadRe
 }
 
 func acknowledged(records []sourceRecord, response uploadResponse) []sourceRecord {
-	if len(response.Accepted) == 0 && len(response.Failed) == 0 {
+	if len(response.AcceptedRecordKeys) == 0 && len(response.FailedRecordKeys) == 0 && len(response.Accepted) == 0 && len(response.Failed) == 0 {
 		return records
 	}
 	set := map[string]struct{}{}
+	for _, key := range response.AcceptedRecordKeys {
+		set[key] = struct{}{}
+	}
 	for _, serial := range response.Accepted {
-		set[serial] = struct{}{}
+		set["weight_info:"+serial] = struct{}{}
 	}
 	result := make([]sourceRecord, 0, len(set))
 	for _, record := range records {
-		if _, ok := set[record.serial]; ok {
+		recordKey := record.recordKey
+		if recordKey == "" {
+			entityType := record.entityType
+			if entityType == "" {
+				entityType = "weight_info"
+			}
+			recordKey = entityType + ":" + record.serial
+		}
+		if _, ok := set[recordKey]; ok {
 			result = append(result, record)
 		}
 	}
@@ -318,14 +379,18 @@ func loadState(path string) (*stateStore, error) {
 		if entry.PrimaryKey == "" {
 			return nil, fmt.Errorf("state file %s contains empty primary_key", path)
 		}
-		store.done[entry.PrimaryKey] = struct{}{}
+		entityType := entry.EntityType
+		if entityType == "" {
+			entityType = "weight_info"
+		}
+		store.done[stateKey(entityType, entry.PrimaryKey)] = struct{}{}
 	}
 	return store, nil
 }
-func (s *stateStore) contains(key string) bool {
+func (s *stateStore) contains(entityType, key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.done[key]
+	_, ok := s.done[stateKey(entityType, key)]
 	return ok
 }
 func (s *stateStore) append(entries []stateEntry) error {
@@ -343,7 +408,7 @@ func (s *stateStore) append(entries []stateEntry) error {
 	}
 	defer file.Close()
 	for _, entry := range entries {
-		if _, ok := s.done[entry.PrimaryKey]; ok {
+		if _, ok := s.done[stateKey(entry.EntityType, entry.PrimaryKey)]; ok {
 			continue
 		}
 		encoded, err := json.Marshal(entry)
@@ -353,9 +418,16 @@ func (s *stateStore) append(entries []stateEntry) error {
 		if _, err := file.Write(append(encoded, '\n')); err != nil {
 			return err
 		}
-		s.done[entry.PrimaryKey] = struct{}{}
+		s.done[stateKey(entry.EntityType, entry.PrimaryKey)] = struct{}{}
 	}
 	return file.Sync()
+}
+
+func stateKey(entityType, primaryKey string) string {
+	if entityType == "" {
+		entityType = "weight_info"
+	}
+	return entityType + "\x00" + primaryKey
 }
 
 func sign(secret, method, path, query, timestamp, nonce string, body []byte) string {
@@ -391,7 +463,7 @@ func toJSON(value any, databaseType string) any {
 		return value.Format("2006-01-02 15:04:05")
 	case []byte:
 		if strings.Contains(strings.ToUpper(databaseType), "BINARY") || strings.Contains(strings.ToUpper(databaseType), "IMAGE") {
-			return fmt.Sprintf("<%d bytes>", len(value))
+			return base64.StdEncoding.EncodeToString(value)
 		}
 		return string(value)
 	case float32, float64:
@@ -422,6 +494,9 @@ func identifier(value string) bool {
 	return value != "" && strings.IndexFunc(value, func(r rune) bool {
 		return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
 	}) == -1
+}
+func invalidWhere(value string) bool {
+	return strings.TrimSpace(value) == "" || strings.Contains(value, ";")
 }
 func env(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {

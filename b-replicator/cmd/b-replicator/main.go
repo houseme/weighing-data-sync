@@ -57,6 +57,7 @@ type queryResponse struct {
 type cRecord struct {
 	ID         int64           `json:"id"`
 	RecordKey  string          `json:"record_key"`
+	EntityType string          `json:"entity_type"`
 	KeyType    string          `json:"key_type"`
 	SerialNo   string          `json:"serialNo"`
 	PlateNo    string          `json:"plateNo"`
@@ -197,8 +198,15 @@ func (a *app) storeRecord(parent context.Context, r cRecord) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO wds_replicated_records (record_key,c_record_id,key_type,serial_no,plate_no,source_time,source,source_database,source_table,uploaded_at,ingested_at,raw_record) VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?) ON DUPLICATE KEY UPDATE c_record_id=VALUES(c_record_id),key_type=VALUES(key_type),serial_no=VALUES(serial_no),plate_no=VALUES(plate_no),source_time=VALUES(source_time),source=VALUES(source),source_database=VALUES(source_database),source_table=VALUES(source_table),uploaded_at=VALUES(uploaded_at),ingested_at=VALUES(ingested_at),raw_record=VALUES(raw_record),replicated_at=UTC_TIMESTAMP(6)`, r.RecordKey, r.ID, r.KeyType, r.SerialNo, r.PlateNo, r.SourceTime, r.Source, r.Database, r.Table, r.UploadedAt, r.IngestedAt, string(r.Record))
+	entityType := r.EntityType
+	if entityType == "" {
+		entityType = "weight_info"
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO wds_replicated_records (record_key,c_record_id,entity_type,key_type,serial_no,plate_no,source_time,source,source_database,source_table,uploaded_at,ingested_at,raw_record) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?) ON DUPLICATE KEY UPDATE c_record_id=VALUES(c_record_id),entity_type=VALUES(entity_type),key_type=VALUES(key_type),serial_no=VALUES(serial_no),plate_no=VALUES(plate_no),source_time=VALUES(source_time),source=VALUES(source),source_database=VALUES(source_database),source_table=VALUES(source_table),uploaded_at=VALUES(uploaded_at),ingested_at=VALUES(ingested_at),raw_record=VALUES(raw_record),replicated_at=UTC_TIMESTAMP(6)`, r.RecordKey, r.ID, entityType, r.KeyType, r.SerialNo, r.PlateNo, r.SourceTime, r.Source, r.Database, r.Table, r.UploadedAt, r.IngestedAt, string(r.Record))
 	if err != nil {
+		return err
+	}
+	if err := upsertBusinessRecord(ctx, tx, entityType, r); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO wds_c_delete_queue (c_record_id,record_key,status,retry_count,next_attempt_at,last_error) VALUES (?, ?, 'pending', 0, UTC_TIMESTAMP(6), NULL) ON DUPLICATE KEY UPDATE c_record_id=VALUES(c_record_id),status='pending',retry_count=0,next_attempt_at=UTC_TIMESTAMP(6),last_error=NULL,updated_at=UTC_TIMESTAMP(6)`, r.ID, r.RecordKey)
@@ -386,14 +394,265 @@ func envBool(key string, fallback bool) bool {
 	}
 	return parsed
 }
+
+type fieldSpec struct {
+	JSONName string
+	Column   string
+}
+
+var weightInfoFields = []fieldSpec{
+	{"serialNo", "serial_no"},
+	{"sysNo", "sys_no"},
+	{"setId", "set_id"},
+	{"cardNo", "card_no"},
+	{"plateNo", "plate_no"},
+	{"weightType", "weight_type"},
+	{"transportUnit", "transport_unit"},
+	{"forwardingUnit", "forwarding_unit"},
+	{"consigneeUnit", "consignee_unit"},
+	{"goodsName", "goods_name"},
+	{"goodsSpec", "goods_spec"},
+	{"grossWeight", "gross_weight"},
+	{"tareWeight", "tare_weight"},
+	{"netWeight", "net_weight"},
+	{"buckleWeight", "buckle_weight"},
+	{"actualWeight", "actual_weight"},
+	{"weightUnit", "weight_unit"},
+	{"unitPrice", "unit_price"},
+	{"sumAmt", "sum_amt"},
+	{"scaleNum", "scale_num"},
+	{"squareNum", "square_num"},
+	{"weighingFee", "weighing_fee"},
+	{"grossStation", "gross_station"},
+	{"tareStation", "tare_station"},
+	{"grossMan", "gross_man"},
+	{"tareMan", "tare_man"},
+	{"grossTime", "gross_time"},
+	{"tareTime", "tare_time"},
+	{"firstTime", "first_time"},
+	{"secondTime", "second_time"},
+	{"updateTime", "update_time"},
+	{"printNum", "print_num"},
+	{"isCancle", "is_cancle"},
+	{"isUploadLocal", "is_upload_local"},
+	{"isUploadCloud", "is_upload_cloud"},
+	{"strBackup1", "str_backup1"},
+	{"strBackup2", "str_backup2"},
+	{"strBackup3", "str_backup3"},
+	{"strBackup4", "str_backup4"},
+	{"strBackup5", "str_backup5"},
+	{"strBackup6", "str_backup6"},
+	{"strBackup7", "str_backup7"},
+	{"strBackup8", "str_backup8"},
+	{"strBackup9", "str_backup9"},
+	{"numBackup1", "num_backup1"},
+	{"numBackup2", "num_backup2"},
+	{"numBackup3", "num_backup3"},
+	{"numBackup4", "num_backup4"},
+	{"numBackup5", "num_backup5"},
+	{"numBackup6", "num_backup6"},
+	{"numBackup7", "num_backup7"},
+	{"numBackup8", "num_backup8"},
+	{"numBackup9", "num_backup9"},
+	{"timeBackup1", "time_backup1"},
+	{"timeBackup2", "time_backup2"},
+	{"timeBackup3", "time_backup3"},
+	{"fGuid", "f_guid"},
+	{"fID", "f_id"},
+	{"relNo", "rel_no"},
+	{"relSer", "rel_ser"},
+	{"regNo", "reg_no"},
+	{"dataType", "data_type"},
+	{"dataLog", "data_log"},
+	{"isFinish", "is_finish"},
+	{"remark", "remark"},
+	{"del_flag", "del_flag"},
+}
+
+var weightPhotoFields = []fieldSpec{
+	{"id", "source_id"},
+	{"serialNo", "serial_no"},
+	{"captureImage", "capture_image_base64"},
+	{"isUploadLocal", "is_upload_local"},
+	{"isUploadCloud", "is_upload_cloud"},
+	{"plateNumber", "plate_number"},
+	{"imageType", "image_type"},
+	{"delFlag", "del_flag"},
+	{"clientId", "client_id"},
+	{"consigneeUnit", "consignee_unit"},
+	{"forwardingUnit", "forwarding_unit"},
+}
+
+func upsertBusinessRecord(ctx context.Context, tx *sql.Tx, entityType string, r cRecord) error {
+	var fields []fieldSpec
+	table := ""
+	switch entityType {
+	case "weight_photo":
+		table = "wds_weight_photo_records"
+		fields = weightPhotoFields
+	default:
+		table = "wds_weight_info_records"
+		fields = weightInfoFields
+	}
+
+	values := map[string]any{}
+	if err := json.Unmarshal(r.Record, &values); err != nil {
+		return fmt.Errorf("decode business record: %w", err)
+	}
+
+	columns := []string{"record_key", "c_record_id"}
+	placeholders := []string{"?", "?"}
+	args := []any{r.RecordKey, r.ID}
+	updates := []string{"c_record_id=VALUES(c_record_id)"}
+	for _, field := range fields {
+		columns = append(columns, field.Column)
+		placeholders = append(placeholders, "?")
+		args = append(args, normalizeJSONValue(values[field.JSONName]))
+		updates = append(updates, field.Column+"=VALUES("+field.Column+")")
+	}
+	columns = append(columns, "raw_record")
+	placeholders = append(placeholders, "?")
+	args = append(args, string(r.Record))
+	updates = append(updates, "raw_record=VALUES(raw_record)", "replicated_at=UTC_TIMESTAMP(6)")
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s", table, strings.Join(columns, ","), strings.Join(placeholders, ","), strings.Join(updates, ","))
+	_, err := tx.ExecContext(ctx, query, args...)
+	return err
+}
+
+func normalizeJSONValue(value any) any {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		if v {
+			return 1
+		}
+		return 0
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	for _, statement := range []string{createRecordsTable, createDeleteQueueTable} {
+	for _, statement := range []string{createRecordsTable, addEntityTypeToRecordsTable, createWeightInfoTable, createWeightPhotoTable, createDeleteQueueTable} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
+			if strings.Contains(err.Error(), "Duplicate column name") {
+				continue
+			}
 			return err
 		}
 	}
 	return nil
 }
 
-const createRecordsTable = `CREATE TABLE IF NOT EXISTS wds_replicated_records (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,record_key VARCHAR(191) NOT NULL,c_record_id BIGINT NOT NULL,key_type VARCHAR(64) NOT NULL,serial_no VARCHAR(191) NULL,plate_no VARCHAR(191) NULL,source_time VARCHAR(64) NULL,source VARCHAR(191) NULL,source_database VARCHAR(191) NULL,source_table VARCHAR(191) NULL,uploaded_at VARCHAR(64) NULL,ingested_at VARCHAR(64) NULL,raw_record LONGTEXT NOT NULL,replicated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),PRIMARY KEY (id),UNIQUE KEY uk_wds_replicated_record_key (record_key),KEY idx_wds_replicated_serial_no (serial_no),KEY idx_wds_replicated_plate_time (plate_no,source_time)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+const createRecordsTable = `CREATE TABLE IF NOT EXISTS wds_replicated_records (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,record_key VARCHAR(191) NOT NULL,c_record_id BIGINT NOT NULL,entity_type VARCHAR(32) NOT NULL DEFAULT 'weight_info',key_type VARCHAR(64) NOT NULL,serial_no VARCHAR(191) NULL,plate_no VARCHAR(191) NULL,source_time VARCHAR(64) NULL,source VARCHAR(191) NULL,source_database VARCHAR(191) NULL,source_table VARCHAR(191) NULL,uploaded_at VARCHAR(64) NULL,ingested_at VARCHAR(64) NULL,raw_record LONGTEXT NOT NULL,replicated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),PRIMARY KEY (id),UNIQUE KEY uk_wds_replicated_record_key (record_key),KEY idx_wds_replicated_entity_type (entity_type,replicated_at),KEY idx_wds_replicated_serial_no (serial_no),KEY idx_wds_replicated_plate_time (plate_no,source_time)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+const addEntityTypeToRecordsTable = `ALTER TABLE wds_replicated_records ADD COLUMN entity_type VARCHAR(32) NOT NULL DEFAULT 'weight_info' AFTER c_record_id`
+const createWeightInfoTable = `CREATE TABLE IF NOT EXISTS wds_weight_info_records (
+id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+record_key VARCHAR(191) NOT NULL,
+c_record_id BIGINT NOT NULL,
+serial_no VARCHAR(191) NULL,
+sys_no VARCHAR(191) NULL,
+set_id VARCHAR(64) NULL,
+card_no VARCHAR(191) NULL,
+plate_no VARCHAR(191) NULL,
+weight_type VARCHAR(191) NULL,
+transport_unit VARCHAR(255) NULL,
+forwarding_unit VARCHAR(255) NULL,
+consignee_unit VARCHAR(255) NULL,
+goods_name VARCHAR(255) NULL,
+goods_spec VARCHAR(255) NULL,
+gross_weight VARCHAR(64) NULL,
+tare_weight VARCHAR(64) NULL,
+net_weight VARCHAR(64) NULL,
+buckle_weight VARCHAR(64) NULL,
+actual_weight VARCHAR(64) NULL,
+weight_unit VARCHAR(64) NULL,
+unit_price VARCHAR(64) NULL,
+sum_amt VARCHAR(64) NULL,
+scale_num VARCHAR(64) NULL,
+square_num VARCHAR(64) NULL,
+weighing_fee VARCHAR(64) NULL,
+gross_station VARCHAR(191) NULL,
+tare_station VARCHAR(191) NULL,
+gross_man VARCHAR(191) NULL,
+tare_man VARCHAR(191) NULL,
+gross_time VARCHAR(64) NULL,
+tare_time VARCHAR(64) NULL,
+first_time VARCHAR(64) NULL,
+second_time VARCHAR(64) NULL,
+update_time VARCHAR(64) NULL,
+print_num VARCHAR(64) NULL,
+is_cancle VARCHAR(64) NULL,
+is_upload_local VARCHAR(64) NULL,
+is_upload_cloud VARCHAR(64) NULL,
+str_backup1 TEXT NULL,
+str_backup2 TEXT NULL,
+str_backup3 TEXT NULL,
+str_backup4 TEXT NULL,
+str_backup5 TEXT NULL,
+str_backup6 TEXT NULL,
+str_backup7 TEXT NULL,
+str_backup8 TEXT NULL,
+str_backup9 TEXT NULL,
+num_backup1 VARCHAR(64) NULL,
+num_backup2 VARCHAR(64) NULL,
+num_backup3 VARCHAR(64) NULL,
+num_backup4 VARCHAR(64) NULL,
+num_backup5 VARCHAR(64) NULL,
+num_backup6 VARCHAR(64) NULL,
+num_backup7 VARCHAR(64) NULL,
+num_backup8 VARCHAR(64) NULL,
+num_backup9 VARCHAR(64) NULL,
+time_backup1 VARCHAR(64) NULL,
+time_backup2 VARCHAR(64) NULL,
+time_backup3 VARCHAR(64) NULL,
+f_guid VARCHAR(191) NULL,
+f_id VARCHAR(191) NULL,
+rel_no VARCHAR(191) NULL,
+rel_ser VARCHAR(64) NULL,
+reg_no VARCHAR(191) NULL,
+data_type VARCHAR(191) NULL,
+data_log TEXT NULL,
+is_finish VARCHAR(64) NULL,
+remark TEXT NULL,
+del_flag VARCHAR(64) NULL,
+raw_record LONGTEXT NOT NULL,
+replicated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+PRIMARY KEY (id),
+UNIQUE KEY uk_wds_weight_info_record_key (record_key),
+KEY idx_wds_weight_info_serial_no (serial_no),
+KEY idx_wds_weight_info_plate_no (plate_no),
+KEY idx_wds_weight_info_times (update_time,second_time,first_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+const createWeightPhotoTable = `CREATE TABLE IF NOT EXISTS wds_weight_photo_records (
+id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+record_key VARCHAR(191) NOT NULL,
+c_record_id BIGINT NOT NULL,
+source_id VARCHAR(64) NULL,
+serial_no VARCHAR(191) NULL,
+capture_image_base64 LONGTEXT NULL,
+is_upload_local VARCHAR(64) NULL,
+is_upload_cloud VARCHAR(64) NULL,
+plate_number VARCHAR(191) NULL,
+image_type VARCHAR(191) NULL,
+del_flag VARCHAR(64) NULL,
+client_id VARCHAR(191) NULL,
+consignee_unit VARCHAR(255) NULL,
+forwarding_unit VARCHAR(255) NULL,
+raw_record LONGTEXT NOT NULL,
+replicated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+PRIMARY KEY (id),
+UNIQUE KEY uk_wds_weight_photo_record_key (record_key),
+KEY idx_wds_weight_photo_serial_no (serial_no),
+KEY idx_wds_weight_photo_plate_type (plate_number,image_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 const createDeleteQueueTable = `CREATE TABLE IF NOT EXISTS wds_c_delete_queue (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,c_record_id BIGINT NOT NULL,record_key VARCHAR(191) NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'pending',retry_count INT NOT NULL DEFAULT 0,next_attempt_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),last_error TEXT NULL,created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),completed_at DATETIME(6) NULL,PRIMARY KEY (id),UNIQUE KEY uk_wds_c_delete_record_key (record_key),KEY idx_wds_c_delete_pending (status,next_attempt_at,id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
