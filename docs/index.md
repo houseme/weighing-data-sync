@@ -25,6 +25,7 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | [快速开始](getting-started.md) | 构建、运行、子命令、本地快速验证 |
 | [配置说明](configuration.md) | 配置项逐项说明、环境变量覆盖、凭据注入、调优 |
 | [Windows 部署](deployment-windows.md) | EXE 打包、现场依赖、安装脚本、计划任务、SQL Server 前置确认 |
+| [A/B/C 三机 Go 服务部署](deployment-abc-go.md) | A 上报、C 接收、B 复制和异步清理的完整部署流程 |
 | [HTTP 协议](api-protocol.md) | 上报请求 / 响应、鉴权、204 / 空体语义 |
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
