@@ -138,6 +138,44 @@ SHA256_BODY_HEX
 
 C 是中心接收服务。推荐先部署 C，再部署 B，最后部署 A。
 
+Linux 推荐使用仓库脚本安装和管理 systemd：
+
+```bash
+cd go-receiver
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver ./cmd/receiver
+
+sudo EXE_PATH="$PWD/bin/go-receiver" \
+  SERVER_ADDR=:80 \
+  INGEST_API_TOKEN=replace-with-a-token \
+  INGEST_SIGN_SECRET=replace-with-a-secret \
+  QUERY_API_TOKEN=replace-with-b-query-token \
+  QUERY_SIGN_SECRET=replace-with-b-query-secret \
+  CLEANUP_API_TOKEN=replace-with-b-cleanup-token \
+  CLEANUP_SIGN_SECRET=replace-with-b-cleanup-secret \
+  ../scripts/go-receiver-linux-systemd.sh install
+```
+
+常用管理命令：
+
+```bash
+sudo ../scripts/go-receiver-linux-systemd.sh status
+sudo ../scripts/go-receiver-linux-systemd.sh restart
+sudo ../scripts/go-receiver-linux-systemd.sh logs
+sudo ../scripts/go-receiver-linux-systemd.sh uninstall
+```
+
+脚本默认：
+
+- 服务名：`go-receiver`
+- 程序目录：`/opt/weighing/go-receiver`
+- 配置文件：`/etc/weighing/go-receiver.env`
+- SQLite：`/var/lib/weighing/go-receiver/receiver.db`
+- 监听端口：`:80`
+- `STORE_RAW_RECORDS=true`
+- `STORE_RAW_PAYLOAD=false`
+
+再次执行 `install` 会保留已有 `/etc/weighing/go-receiver.env`；确认要重写配置时设置 `OVERWRITE_ENV=1`。卸载默认保留配置和 SQLite 数据；确认删除时可设置 `REMOVE_CONFIG=1 REMOVE_DATA=1`。
+
 Linux systemd 示例：
 
 ```ini
