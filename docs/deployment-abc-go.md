@@ -271,40 +271,77 @@ A 状态文件约定：
 
 ## Windows 常驻运行
 
-三个 Go 程序都可以作为普通 exe 运行。生产建议使用 Windows 计划任务或现场已有进程管理工具拉起，不强依赖 Windows service SDK。
+三个 Go 程序都可以作为普通 exe 运行。A/B 当前不是原生 Windows Service Control Manager 程序，因此仓库提供的服务脚本使用 Windows 计划任务承载，效果是开机自动启动、失败可重试、可手工启动/停止，不额外依赖 NSSM。
 
-计划任务示例：
-
-```powershell
-$Action = New-ScheduledTaskAction `
-  -Execute "C:\weighing\a-uploader\a-uploader.exe" `
-  -WorkingDirectory "C:\weighing\a-uploader"
-
-$Trigger = New-ScheduledTaskTrigger -AtStartup
-
-Register-ScheduledTask `
-  -TaskName "WeighingAUploader" `
-  -Action $Action `
-  -Trigger $Trigger `
-  -RunLevel Highest `
-  -User "SYSTEM"
-```
-
-B 机器可把任务名和路径改为：
+### 安装 A 开机自启
 
 ```powershell
-TaskName: WeighingBReplicator
-Execute:  C:\weighing\b-replicator\b-replicator.exe
+PowerShell -ExecutionPolicy Bypass -File .\scripts\install-a-uploader-windows-service.ps1 `
+  -ExePath .\a-uploader.exe `
+  -CEndpoint "http://c-server/weighing-data-sync/put" `
+  -SqlServerHost "127.0.0.1" `
+  -SqlServerDatabase "shweight" `
+  -SqlServerUsername "sa"
 ```
 
-C 如果部署在 Windows，可把任务名和路径改为：
+脚本会交互输入 `INGEST_API_TOKEN`、`INGEST_SIGN_SECRET` 和 SQL Server 密码，随后安装到：
+
+- 程序目录：`C:\Program Files\WeighingAUploader`
+- 数据目录：`C:\ProgramData\WeighingAUploader`
+- 状态文件：`C:\ProgramData\WeighingAUploader\data\a-uploader-state.jsonl`
+- 日志目录：`C:\ProgramData\WeighingAUploader\logs`
+- 计划任务：`WeighingAUploader`
+
+卸载 A：
 
 ```powershell
-TaskName: WeighingGoReceiver
-Execute:  C:\weighing\go-receiver\go-receiver.exe
+PowerShell -ExecutionPolicy Bypass -File .\scripts\uninstall-a-uploader-windows-service.ps1
 ```
 
-建议把生产环境变量写入受限 ACL 的启动脚本或由现场配置系统注入，不要把真实密钥提交到仓库。
+默认保留 `C:\ProgramData\WeighingAUploader`，避免误删状态文件；确认要删除数据时再加 `-RemoveData`。
+
+### 安装 B 开机自启
+
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\scripts\install-b-replicator-windows-service.ps1 `
+  -ExePath .\b-replicator.exe `
+  -CBaseUrl "http://c-server"
+```
+
+脚本会交互输入 `MYSQL_DSN`、`QUERY_API_TOKEN`、`QUERY_SIGN_SECRET`、`CLEANUP_API_TOKEN`、`CLEANUP_SIGN_SECRET`。`MYSQL_DSN` 示例：
+
+```text
+root:root@tcp(127.0.0.1:3306)/weighing?charset=utf8mb4&parseTime=true&loc=Local
+```
+
+B 安装位置：
+
+- 程序目录：`C:\Program Files\WeighingBReplicator`
+- 日志目录：`C:\ProgramData\WeighingBReplicator\logs`
+- 计划任务：`WeighingBReplicator`
+- `AUTO_MIGRATE=true` 默认开启，目标 database 已存在时会自动创建或检查四张 MySQL 表。
+
+卸载 B：
+
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\scripts\uninstall-b-replicator-windows-service.ps1
+```
+
+默认保留 `C:\ProgramData\WeighingBReplicator` 日志；确认要删除时再加 `-RemoveData`。
+
+常用运维命令：
+
+```powershell
+Start-ScheduledTask -TaskName WeighingAUploader
+Stop-ScheduledTask -TaskName WeighingAUploader
+Get-ScheduledTask -TaskName WeighingAUploader
+
+Start-ScheduledTask -TaskName WeighingBReplicator
+Stop-ScheduledTask -TaskName WeighingBReplicator
+Get-ScheduledTask -TaskName WeighingBReplicator
+```
+
+脚本会把生产环境变量写入安装目录下受限 ACL 的 `.env`，真实密钥不要提交到仓库。
 
 ## 启动顺序
 
