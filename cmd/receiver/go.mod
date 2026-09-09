@@ -1,4 +1,4 @@
-module weighing-data-sync/go-receiver
+module github.com/houseme/weighing-data-sync/go-receiver
 
 go 1.26.0
 

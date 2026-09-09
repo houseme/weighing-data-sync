@@ -1,4 +1,4 @@
-module weighing-data-sync/b-replicator
+module github.com/houseme/weighing-data-sync/replicator
 
 go 1.24.0
 

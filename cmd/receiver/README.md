@@ -19,7 +19,7 @@
 启动服务：
 
 ```bash
-cd go-receiver
+cd cmd/receiver
 export SQLITE_PATH='data/receiver.db'
 export INGEST_API_TOKEN='a-write-token'
 export INGEST_SIGN_SECRET='a-write-sign-secret'
@@ -27,7 +27,7 @@ export QUERY_API_TOKEN='b-read-token'
 export QUERY_SIGN_SECRET='b-read-sign-secret'
 export CLEANUP_API_TOKEN='b-delete-token'
 export CLEANUP_SIGN_SECRET='b-delete-sign-secret'
-go run ./cmd/receiver
+go run .
 ```
 
 生产默认 `REQUIRE_AUTH=true`，每个角色都必须同时配置 Bearer Token 和 HMAC 签名密钥。`API_TOKEN` / `SIGN_SECRET` 仍可作为三类角色的兼容兜底，但不建议生产共用。

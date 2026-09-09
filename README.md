@@ -39,7 +39,9 @@ scripts/validate_sqlserver_e2e.sh                       # Docker SQL Server 端�
 | [日志与排障](docs/logging.md) | 结构化日志与 `stage` 目录、示例、排障流程 |
 | [架构](docs/architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制与 tiberius 方案 |
 | [功能全景与实现清单](docs/features.md) | 当前所有功能、数据流、边界和验证现状 |
-| [Go SQLite 接收服务](go-receiver/README.md) | 独立 Go 服务：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
+| [Go SQLite 接收服务](cmd/receiver/README.md) | 独立 Go 服务：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
+| [Go SQL Server 上报器](cmd/uploader/README.md) | A 机器独立 Go module：读取 SQL Server 双实体数据并签名上报到 C |
+| [Go MySQL 复制器](cmd/replicator/README.md) | B 机器独立 Go module：从 C 查询原始记录、写入 MySQL 并异步清理 |
 | [SQL Server Docker E2E](docs/sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [常见问题](docs/troubleshooting.md) | SQL Server 连接失败、云端 4xx、占位符凭据、队头阻塞 |
 

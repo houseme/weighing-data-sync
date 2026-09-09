@@ -2,11 +2,13 @@
 
 `a-uploader` is a standalone Go executable for machine A. It reads pending `tbl_weightInfo` weighing rows and `tbl_weightPhoto` image rows from SQL Server, signs a `POST` upload to C, and records only C-confirmed SQL Server primary keys in a local JSONL state file. It is intended to run directly as a normal Windows `.exe`; it has no cgo dependency.
 
+Canonical Go module path: `github.com/houseme/weighing-data-sync/uploader`. The repository directory is `cmd/uploader`; the Windows executable keeps the `a-uploader` name.
+
 ## Build
 
 ```powershell
-cd a-uploader
-go build -o bin\a-uploader.exe .\cmd\a-uploader
+cd cmd\uploader
+go build -o bin\a-uploader.exe .
 ```
 
 The only database driver is the pure-Go SQL Server driver `github.com/denisenkom/go-mssqldb`.

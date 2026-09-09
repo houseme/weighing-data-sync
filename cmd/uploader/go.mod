@@ -1,4 +1,4 @@
-module weighing-data-sync/a-uploader
+module github.com/houseme/weighing-data-sync/uploader
 
 go 1.25.0
 

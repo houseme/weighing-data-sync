@@ -30,7 +30,9 @@ Rust Edition 2024 单机同步守护进程（`sync-daemon`），把单机 Window
 | [日志与排障](logging.md) | 结构化日志与 `stage` 目录、示例 |
 | [架构](architecture.md) | 两条同步链路、模块职责、SeaORM-X 限制说明 |
 | [功能全景与实现清单](features.md) | 当前项目所有功能、入口、数据流、边界和验证现状 |
-| [Go SQLite 接收服务](../go-receiver/README.md) | 独立 Go module：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
+| [Go SQLite 接收服务](../cmd/receiver/README.md) | C 机器独立 Go module：A 端上报、B 端查询/清理、角色化签名鉴权、SQLite 最小落库 |
+| [Go SQL Server 上报器](../cmd/uploader/README.md) | A 机器独立 Go module：读取 SQL Server 双实体数据并签名上报到 C |
+| [Go MySQL 复制器](../cmd/replicator/README.md) | B 机器独立 Go module：从 C 查询原始记录、写入 MySQL 并异步清理 |
 | [SQL Server Docker E2E](sqlserver-docker-e2e.md) | 模拟 SQL Server 数据源、Compose 编排与端到端验收 |
 | [SQL Server 转 MySQL SQL](sqlserver_to_mysql.sql) | 将 SQL Server 样本源表 DDL / DML 转为 MySQL 8.0 可执行脚本 |
 | [常见问题](troubleshooting.md) | 连接失败、4xx、占位符凭据、队头阻塞 |
@@ -45,6 +47,10 @@ weighing-data-sync/
 ├── config/
 │   └── default.toml
 ├── docker/                     # SQL Server E2E Compose、样本数据、验收脚本
+├── cmd/
+│   ├── receiver/               # C 机器 Go SQLite 接收服务 module
+│   ├── uploader/               # A 机器 Go SQL Server 上报器 module
+│   └── replicator/             # B 机器 Go MySQL 复制器 module
 ├── scripts/
 │   └── validate_sqlserver_e2e.sh
 ├── data/                       # 运行期 SQLite（已 gitignore）

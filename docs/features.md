@@ -434,12 +434,13 @@ SQLite 缓存 API 已实现，但当前二进制没有“从命令行插入一�
 
 ## 14. Docker 与端到端验收
 
-`scripts/validate_sqlserver_e2e.sh` 编排 `docker/docker-compose.e2e.yml`，覆盖完整的默认生产路径：
+`scripts/validate_sqlserver_e2e.sh` 编排 `docker/docker-compose.e2e.yml`，覆盖 SQL Server
+读取、HTTP 上报和 Go 接收端持久化路径：
 
 1. `sqlserver` 启动 SQL Server 2022 Linux 容器，建立 `yunfu.dbo.tbl_weightInfo` 66 列表并写入 100 条样本；
-2. `receiver` 启动本项目 HTTP 接收端，启用 Bearer 鉴权和 `inbound_payloads` 持久化；
+2. `receiver` 从 `cmd/receiver` 构建并启动 Go SQLite 接收服务，写入 `wds_receive_batches` / `wds_receive_records`；
 3. `sync-runner` 运行一次 `sync-now`，从 SQL Server 读取 100 条并上传；
-4. `receiver-verify` 检查 SQLite 中存在一批 100 条完整流水号；
+4. `receiver-verify` 检查 SQLite 中存在一批 100 条完整流水号，并确认 `raw_record` 已保存；
 5. `sqlserver-verify` 检查 100 条源记录已回写；
 6. `e2e` 在两个验收器成功后输出通过消息。
 

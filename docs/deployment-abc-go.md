@@ -6,7 +6,15 @@
 - C 机器：运行 `go-receiver`，接收 A 上报，写入本地 SQLite，供 B 查询和清理。
 - B 机器：运行 `b-replicator`，从 C 查询数据，写入本机 MySQL，写入成功后异步删除 C 上的数据。
 
-三个服务都是独立 Go module，可分别构建和部署。数据库驱动均为纯 Go 驱动，不依赖 CGO、ODBC 或本机 C 编译环境。
+三个服务都位于仓库 `cmd/` 目录下，并且各自是独立 Go module，可分别构建和部署：
+
+| 机器 | 目录 | Module path | 可执行文件 |
+| --- | --- | --- | --- |
+| A | `cmd/uploader` | `github.com/houseme/weighing-data-sync/uploader` | `a-uploader.exe` |
+| C | `cmd/receiver` | `github.com/houseme/weighing-data-sync/go-receiver` | `go-receiver` / `go-receiver.exe` |
+| B | `cmd/replicator` | `github.com/houseme/weighing-data-sync/replicator` | `b-replicator.exe` |
+
+数据库驱动均为纯 Go 驱动，不依赖 CGO、ODBC 或本机 C 编译环境。
 
 ## 数据流
 
@@ -67,33 +75,33 @@ C 的 SQLite 只做最小中转，保存 `entity_type`、`record_key`、`serial_
 
 ## 构建
 
-在任意有 Go 1.24+ 的构建机上构建 Windows amd64 可执行文件：
+在任意有 Go 1.26+ 的构建机上构建 Windows amd64 可执行文件：
 
 ```powershell
-cd a-uploader
+cd cmd\uploader
 $env:CGO_ENABLED = "0"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -o bin\a-uploader.exe .\cmd\a-uploader
+go build -o bin\a-uploader.exe .
 
-cd ..\go-receiver
+cd ..\receiver
 $env:CGO_ENABLED = "0"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -o bin\go-receiver.exe .\cmd\receiver
+go build -o bin\go-receiver.exe .
 
-cd ..\b-replicator
+cd ..\replicator
 $env:CGO_ENABLED = "0"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -o bin\b-replicator.exe .\cmd\b-replicator
+go build -o bin\b-replicator.exe .
 ```
 
 如果 C 部署在 Linux x86_64：
 
 ```bash
-cd go-receiver
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver ./cmd/receiver
+cd cmd/receiver
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver .
 ```
 
 驱动说明：
@@ -141,8 +149,8 @@ C 是中心接收服务。推荐先部署 C，再部署 B，最后部署 A。
 Linux 推荐使用仓库脚本安装和管理 systemd：
 
 ```bash
-cd go-receiver
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver ./cmd/receiver
+cd cmd/receiver
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver .
 
 sudo EXE_PATH="$PWD/bin/go-receiver" \
   SERVER_ADDR=:80 \
@@ -152,16 +160,16 @@ sudo EXE_PATH="$PWD/bin/go-receiver" \
   QUERY_SIGN_SECRET=replace-with-b-query-secret \
   CLEANUP_API_TOKEN=replace-with-b-cleanup-token \
   CLEANUP_SIGN_SECRET=replace-with-b-cleanup-secret \
-  ../scripts/go-receiver-linux-systemd.sh install
+  ../../scripts/go-receiver-linux-systemd.sh install
 ```
 
 常用管理命令：
 
 ```bash
-sudo ../scripts/go-receiver-linux-systemd.sh status
-sudo ../scripts/go-receiver-linux-systemd.sh restart
-sudo ../scripts/go-receiver-linux-systemd.sh logs
-sudo ../scripts/go-receiver-linux-systemd.sh uninstall
+sudo ../../scripts/go-receiver-linux-systemd.sh status
+sudo ../../scripts/go-receiver-linux-systemd.sh restart
+sudo ../../scripts/go-receiver-linux-systemd.sh logs
+sudo ../../scripts/go-receiver-linux-systemd.sh uninstall
 ```
 
 脚本默认：

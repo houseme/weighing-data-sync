@@ -2,6 +2,8 @@
 
 `b-replicator` is the standalone Go program for the B Windows machine. It fetches raw records from C, writes them idempotently to local MySQL, then deletes C records through a separate asynchronous worker.
 
+Canonical Go module path: `github.com/houseme/weighing-data-sync/replicator`. The repository directory is `cmd/replicator`; the Windows executable keeps the `b-replicator` name.
+
 It uses the pure-Go `github.com/go-sql-driver/mysql` driver and the standard-library HTTP client. C must be started with `STORE_RAW_RECORDS=true`: B always requests `include_raw=true`, and refuses to queue cleanup when C does not return the full `record` JSON.
 
 ## Delivery guarantee
@@ -11,20 +13,20 @@ The raw-record upsert, typed business-table upsert, and insert into `wds_c_delet
 ## Run
 
 ```powershell
-cd b-replicator
+cd cmd\replicator
 $env:MYSQL_DSN = 'user:password@tcp(127.0.0.1:3306)/weighing?charset=utf8mb4&parseTime=true&loc=Local'
 $env:C_BASE_URL = 'http://c-server:18081'
 $env:QUERY_API_TOKEN = 'b-read-token'
 $env:QUERY_SIGN_SECRET = 'b-read-sign-secret'
 $env:CLEANUP_API_TOKEN = 'b-delete-token'
 $env:CLEANUP_SIGN_SECRET = 'b-delete-sign-secret'
-go run ./cmd/b-replicator
+go run .
 ```
 
 Windows build:
 
 ```powershell
-go build -o b-replicator.exe ./cmd/b-replicator
+go build -o bin\b-replicator.exe .
 ```
 
 ## Configuration

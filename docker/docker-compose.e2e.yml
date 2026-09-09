@@ -25,16 +25,16 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: go-receiver
     depends_on:
       sqlserver:
         condition: service_healthy
     environment:
-      RUST_LOG: info
-      WDS__DATABASE__URL: sqlite:///data/weighing_sync.db
-      WDS__SERVER__BIND: 0.0.0.0:8080
-      WDS__SERVER__API_KEY: e2e-token
-      WDS__SERVER__PERSIST: "true"
-    command: ["serve", "--config", "config/default.toml"]
+      SERVER_ADDR: 0.0.0.0:8080
+      SQLITE_PATH: /data/receiver.db
+      REQUIRE_AUTH: "false"
+      STORE_RAW_RECORDS: "true"
+      STORE_RAW_PAYLOAD: "true"
     ports:
       - "${WDS_E2E_RECEIVER_PORT:-18080}:8080"
     volumes:
@@ -43,7 +43,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS http://127.0.0.1:8080/ >/dev/null"
+          "curl -fsS http://127.0.0.1:8080/health >/dev/null"
         ]
       interval: 5s
       timeout: 3s
@@ -84,6 +84,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: go-receiver
     depends_on:
       sync-runner:
         condition: service_completed_successfully
