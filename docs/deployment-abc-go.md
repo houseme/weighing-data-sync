@@ -3,8 +3,8 @@
 本文档面向三台机器分工部署：
 
 - A 机器：运行 `a-uploader`，从本机或局域网 SQL Server 读取称重记录，签名上报到 C。
-- C 机器：运行 `go-receiver`，接收 A 上报，写入本地 SQLite，供 B 查询和清理。
-- B 机器：运行 `b-replicator`，从 C 查询数据，写入本机 MySQL，写入成功后异步删除 C 上的数据。
+- C 机器：运行 `go-receiver`，接收 A 上报，写入本地 SQLite 或 MySQL/MariaDB，供 B 查询；数据默认长期保留。
+- B 机器：运行 `b-replicator`，从 C 查询数据，写入本机 MySQL；C 上的数据后续通过独立 cleanup 凭据手动清理。
 
 三个服务都位于仓库 `cmd/` 目录下，并且各自是独立 Go module，可分别构建和部署：
 
@@ -35,17 +35,15 @@
                                              │ signed GET include_raw=true       │
                                              │◀──────────────────────────────────┤
                                              │──────────────────────────────────▶│ upsert business row
-                                             │                                   │ enqueue delete job
-                                             │ signed DELETE                     │
-                                             │◀──────────────────────────────────┤ async delete worker
+                                             │                                   │
 ```
 
 核心一致性约定：
 
 - A 只在 C 明确确认后，把 SQL Server 主键写入本地 `STATE_FILE`，并按 `entity_type` 区分称重信息和称重图片。
 - C 以 `record_key` 幂等保存 A 上报内容；称重信息使用 `weight_info:<serialNo>`，称重图片使用 `weight_photo:<id>`。
-- B 将业务记录写入 MySQL 和写入删除队列放在同一个事务中。
-- B 的删除 C 记录是异步 outbox；写 MySQL 成功后，即使进程崩溃，删除任务也会在重启后继续。
+- B 将业务记录幂等写入 MySQL。
+- C 不会因 B 同步成功自动删除数据；需要清理时走独立 cleanup 接口和密码，并且只能删除一周以前的数据。
 - C 为了让 B 能完整写入 MySQL，必须启用 `STORE_RAW_RECORDS=true`；为了减少 C 数据量，保持 `STORE_RAW_PAYLOAD=false`。
 
 ## 交互数据内容
@@ -67,7 +65,7 @@ A 上报到 C 的 payload 使用双实体数组：
 }
 ```
 
-C 的 SQLite 只做最小中转，保存 `entity_type`、`record_key`、`serial_no`、`plate_no`、时间和原始 JSON。B 从 C 拉取 `include_raw=true` 后写入三张 MySQL 表：
+C 的接收库保存 `entity_type`、`record_key`、`serial_no`、`plate_no`、时间和原始 JSON，可使用 SQLite 或 MySQL/MariaDB。B 从 C 拉取 `include_raw=true` 后写入三张 MySQL 表：
 
 - `wds_replicated_records`：完整原始 JSON 和中转元数据。
 - `wds_weight_info_records`：按 `tbl_weightInfo` 实体字段展开后的业务表。
@@ -109,7 +107,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver .
 | 项目 | 数据库 | 驱动 |
 | --- | --- | --- |
 | `a-uploader` | SQL Server | `github.com/denisenkom/go-mssqldb` |
-| `go-receiver` | SQLite | `modernc.org/sqlite` |
+| `go-receiver` | SQLite 或 MySQL/MariaDB | `modernc.org/sqlite` / `github.com/go-sql-driver/mysql` |
 | `b-replicator` | MySQL | `github.com/go-sql-driver/mysql` |
 
 ## 凭据规划
@@ -153,7 +151,9 @@ cd cmd/receiver
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/go-receiver .
 
 sudo EXE_PATH="$PWD/bin/go-receiver" \
-  SERVER_ADDR=:80 \
+  SERVER_ADDR=127.0.0.1:18081 \
+  DB_DRIVER=mysql \
+  MYSQL_DSN='weighing_receiver:password@tcp(127.0.0.1:3306)/weighing_receiver?charset=utf8mb4&parseTime=false&loc=Local' \
   INGEST_API_TOKEN=replace-with-a-token \
   INGEST_SIGN_SECRET=replace-with-a-secret \
   QUERY_API_TOKEN=replace-with-b-query-token \
@@ -178,9 +178,26 @@ sudo ../../scripts/go-receiver-linux-systemd.sh uninstall
 - 程序目录：`/opt/weighing/go-receiver`
 - 配置文件：`/etc/weighing/go-receiver.env`
 - SQLite：`/var/lib/weighing/go-receiver/receiver.db`
-- 监听端口：`:80`
+- 监听端口：`127.0.0.1:18081`，公网入口由 Caddy 反向代理
 - `STORE_RAW_RECORDS=true`
 - `STORE_RAW_PAYLOAD=false`
+
+Caddy 默认站点可只转发 API 路径到 receiver，其余路径继续保留静态页：
+
+```caddyfile
+:80 {
+  handle /weighing-data-sync/* {
+    reverse_proxy 127.0.0.1:18081
+  }
+  handle /health {
+    reverse_proxy 127.0.0.1:18081
+  }
+  handle {
+    root * /data/web/default
+    file_server
+  }
+}
+```
 
 再次执行 `install` 会保留已有 `/etc/weighing/go-receiver.env`；确认要重写配置时设置 `OVERWRITE_ENV=1`。卸载默认保留配置和 SQLite 数据；确认删除时可设置 `REMOVE_CONFIG=1 REMOVE_DATA=1`。
 
@@ -198,7 +215,9 @@ WorkingDirectory=/opt/weighing/go-receiver
 ExecStart=/opt/weighing/go-receiver/go-receiver
 Restart=always
 RestartSec=5
-Environment=SERVER_ADDR=0.0.0.0:18081
+Environment=SERVER_ADDR=127.0.0.1:18081
+Environment=DB_DRIVER=mysql
+Environment=MYSQL_DSN=weighing_receiver:password@tcp(127.0.0.1:3306)/weighing_receiver?charset=utf8mb4&parseTime=false&loc=Local
 Environment=SQLITE_PATH=/opt/weighing/go-receiver/data/receiver.db
 Environment=STORE_RAW_RECORDS=true
 Environment=STORE_RAW_PAYLOAD=false
@@ -218,7 +237,8 @@ Windows PowerShell 临时启动示例：
 
 ```powershell
 cd C:\weighing\go-receiver
-$env:SERVER_ADDR = "0.0.0.0:18081"
+$env:SERVER_ADDR = "127.0.0.1:18081"
+$env:DB_DRIVER = "sqlite"
 $env:SQLITE_PATH = "C:\weighing\go-receiver\data\receiver.db"
 $env:STORE_RAW_RECORDS = "true"
 $env:STORE_RAW_PAYLOAD = "false"
@@ -269,7 +289,7 @@ $env:DELETE_INTERVAL_SECONDS = "2"
 
 - C 必须启用 `STORE_RAW_RECORDS=true`，否则 B 会拒绝没有完整 `record` JSON 的响应。
 - MySQL 表的 `record_key` 有唯一索引，重复从 C 拉取不会重复写业务记录。
-- 删除 C 失败不会影响 MySQL 已写入数据；失败任务会留在 `wds_c_delete_queue` 重试。
+- B 不再把清理 C 数据作为同步成功的必要步骤；C 数据按手动 cleanup 策略保留。
 - B 已经把 JSON 同步拆入 `wds_weight_info_records` / `wds_weight_photo_records`，同时保留 `wds_replicated_records.raw_record` 便于追溯和后续字段校正。
 
 ## 部署 A
@@ -396,8 +416,7 @@ Get-ScheduledTask -TaskName WeighingBReplicator
 3. 启动 A，确认能连接 SQL Server，并开始上报。
 4. 观察 C 的 SQLite 数据量先增长。
 5. 观察 B 的 MySQL `wds_replicated_records` 增长。
-6. 观察 B 的 `wds_c_delete_queue` 中任务变为 `done`。
-7. 再查 C，确认已被 B 成功处理的数据不再保留。
+6. 再查 C，确认数据仍保留，可供后续追溯或手动清理。
 
 ## 验收
 
@@ -411,7 +430,6 @@ B MySQL 检查：
 
 ```sql
 SELECT COUNT(*) FROM wds_replicated_records;
-SELECT status, COUNT(*) FROM wds_c_delete_queue GROUP BY status;
 SELECT record_key, c_record_id, replicated_at
 FROM wds_replicated_records
 ORDER BY replicated_at DESC
@@ -424,18 +442,19 @@ A 状态文件检查：
 Get-Content C:\weighing\a-uploader\data\a-uploader-state.jsonl -Tail 10
 ```
 
-C 最小保留检查：
+C 保留检查：
 
-- B 正常工作时，C 的待查询记录应被持续删除。
+- B 正常工作时，C 的接收数据仍会保留。
 - `wds_receive_batches.raw_payload` 默认为空。
-- `wds_receive_records.raw_record` 只在记录被 B 消费前临时保留。
+- `wds_receive_records.raw_record` 在 `STORE_RAW_RECORDS=true` 时保留，供 B 拉取和后续追溯。
+- cleanup 接口必须使用独立 `CLEANUP_API_TOKEN` / `CLEANUP_SIGN_SECRET`，且只能删除一周以前的数据。
 
 ## 升级和回滚
 
 升级建议：
 
 1. 先停 A，避免继续向 C 写入新数据。
-2. 等 B 把 C 中已有数据尽量消费并删除。
+2. 等 B 把 C 中已有数据尽量消费。
 3. 停 B。
 4. 升级 C，保留 SQLite 数据文件。
 5. 启动 C 并检查 `/health`。
@@ -461,20 +480,12 @@ C 没有启用 `STORE_RAW_RECORDS=true`，或历史数据是在启用前写入�
 
 ### C 数据没有下降
 
-检查 B 的 `wds_c_delete_queue`：
-
-```sql
-SELECT status, retry_count, last_error, COUNT(*)
-FROM wds_c_delete_queue
-GROUP BY status, retry_count, last_error;
-```
-
-如果大量 `failed`，通常是 C 清理凭据错误、C 地址不可达，或 DELETE 签名路径和 C 配置的 `C_CLEANUP_ROUTE` 不一致。
+这是当前设计内行为。C 默认保留接收到的数据，需要人工调用 cleanup 接口清理；服务会拒绝删除一周以内的数据。
 
 ### A 重启后重复上报
 
 确认 `STATE_FILE` 使用绝对路径，且计划任务的运行账号对该目录有读写权限。相对路径会受 `WorkingDirectory` 影响。
 
-### MySQL 写入成功但 C 删除失败
+### MySQL 写入成功但 C 仍保留数据
 
-这是设计内行为。B 会保留删除队列并自动重试，C 中的数据会暂时保留，但不会导致 B 业务表重复插入。
+这是设计内行为。C 的清理是独立运维动作，不影响 B 业务表幂等写入。

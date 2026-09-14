@@ -1,15 +1,15 @@
 # Go SQLite Receiver
 
-这是一个部署在 C 机器上的独立 Go 接收服务：A 机器主动上报称重 JSON，服务验签鉴权后幂等写入 SQLite；B 机器可以查询数据，并按数据库 `id` 或业务唯一标识清理记录。目录内是单独的 Go module，不依赖 Rust 代码；SQLite driver 使用 `modernc.org/sqlite`，纯 Go 实现，不需要 CGO。
+这是一个部署在 C 机器上的独立 Go 接收服务：A 机器主动上报称重 JSON，服务验签鉴权后幂等写入 SQLite 或 MySQL/MariaDB；B 机器可以查询数据。清理记录必须走独立 cleanup 凭据，并且服务只允许删除一周以前的数据。目录内是单独的 Go module，不依赖 Rust 代码；SQLite driver 使用 `modernc.org/sqlite`，MySQL/MariaDB driver 使用 `github.com/go-sql-driver/mysql`，都不需要 CGO。
 
 ## 功能
 
 - `POST /weighing-data-sync/put`：接收批量 JSON，上报体兼容现有 Rust 同步协议，也支持新的 `weight_info_records` / `weight_photo_records` 双实体 payload。
 - `GET /weighing-data-sync/records`：按 `id` / `record_key` / `entity_type` / `plateNo` / `serialNo` / `from` / `to` 查询。
-- `DELETE /weighing-data-sync/records/{id}`：B 机器按 SQLite 自增 `id` 清理单条记录。
+- `DELETE /weighing-data-sync/records/{id}`：按数据库自增 `id` 清理单条记录；只有记录时间早于 7 天才会实际删除。
 - `DELETE /weighing-data-sync/records/by-key/{record_key}`：B 机器按业务唯一标识清理单条记录。
-- `DELETE /weighing-data-sync/records?id=...` 或 `?record_key=...`：兼容 query 形式清理。
-- SQLite 幂等落库：表内都有 `INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id >= 0)` 自增 `id`；称重信息使用 `weight_info:<serialNo>`，称重图片使用 `weight_photo:<id>` 作为业务幂等键。
+- `DELETE /weighing-data-sync/records?id=...` 或 `?record_key=...`：兼容 query 形式清理；同样受 7 天保留期限制。
+- SQLite/MySQL 幂等落库：表内都有自增 `id`；称重信息使用 `weight_info:<serialNo>`，称重图片使用 `weight_photo:<id>` 作为业务幂等键。
 - 最小存储：默认只保存查询/清理必要字段，不保存完整原始记录和完整批次 payload；需要审计时可显式打开。
 - 鉴权分权：A 写入、B 查询、B 清理分别配置 Bearer Token 和 HMAC-SHA256 签名密钥，默认要求两者同时存在。
 - 自动建表：默认启动时创建 `wds_receive_records` 和 `wds_receive_batches`。
@@ -30,12 +30,29 @@ export CLEANUP_SIGN_SECRET='b-delete-sign-secret'
 go run .
 ```
 
+使用 MySQL/MariaDB：
+
+```bash
+cd cmd/receiver
+export DB_DRIVER='mysql'
+export MYSQL_DSN='weighing_receiver:password@tcp(127.0.0.1:3306)/weighing_receiver?charset=utf8mb4&parseTime=false&loc=Local'
+export INGEST_API_TOKEN='a-write-token'
+export INGEST_SIGN_SECRET='a-write-sign-secret'
+export QUERY_API_TOKEN='b-read-token'
+export QUERY_SIGN_SECRET='b-read-sign-secret'
+export CLEANUP_API_TOKEN='cleanup-token'
+export CLEANUP_SIGN_SECRET='cleanup-sign-secret'
+go run .
+```
+
 生产默认 `REQUIRE_AUTH=true`，每个角色都必须同时配置 Bearer Token 和 HMAC 签名密钥。`API_TOKEN` / `SIGN_SECRET` 仍可作为三类角色的兼容兜底，但不建议生产共用。
 
 ## 配置项
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `DB_DRIVER` / `DATABASE_DRIVER` | `sqlite` | 存储后端，支持 `sqlite` / `mysql` / `mariadb` |
+| `MYSQL_DSN` / `DATABASE_DSN` | 空 | MySQL/MariaDB DSN；`DB_DRIVER=mysql` 时必填 |
 | `SQLITE_PATH` | `data/receiver.db` | SQLite 数据库文件路径，会自动创建父目录 |
 | `SQLITE_DSN` | 空 | SQLite driver DSN；设置后优先于 `SQLITE_PATH`，例如 `file:data/receiver.db?cache=shared` |
 | `SERVER_ADDR` | `:18081` | HTTP 监听地址 |
@@ -54,8 +71,11 @@ go run .
 | `STORE_RAW_PAYLOAD` | `false` | 是否保存每批完整原始 payload JSON |
 | `RETURN_RAW_RECORDS` | `false` | 查询结果是否默认返回 `record` 原始 JSON；也可用 `include_raw=true` 临时打开 |
 | `AUTO_MIGRATE` | `true` | 启动时自动建表 |
+| `MIN_DELETE_AGE_HOURS` | `168` | 清理接口最小保留时间，不能小于 168 小时 |
 | `SQLITE_MAX_OPEN_CONNS` | `1` | SQLite 最大连接数，默认串行写入，避免锁竞争 |
 | `SQLITE_MAX_IDLE_CONNS` | `1` | SQLite 空闲连接数 |
+| `MYSQL_MAX_OPEN_CONNS` | `10` | MySQL/MariaDB 最大连接数 |
+| `MYSQL_MAX_IDLE_CONNS` | `5` | MySQL/MariaDB 空闲连接数 |
 
 ## POST 示例
 
@@ -128,7 +148,7 @@ curl -sS 'http://127.0.0.1:18081/weighing-data-sync/records?serialNo=20260728000
 
 ## DELETE 清理示例
 
-按 SQLite 自增 `id` 清理：
+按数据库自增 `id` 清理。服务会校验记录时间，只有 `source_time` 或 `ingested_at` 早于 7 天时才会删除：
 
 ```bash
 curl -sS -X DELETE 'http://127.0.0.1:18081/weighing-data-sync/records/123' \

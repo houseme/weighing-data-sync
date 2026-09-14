@@ -22,7 +22,9 @@ Environment overrides:
   CONFIG_DIR=/etc/weighing
   DATA_DIR=/var/lib/weighing/go-receiver
   ENV_FILE=/etc/weighing/go-receiver.env
-  SERVER_ADDR=:80
+  SERVER_ADDR=127.0.0.1:18081
+  DB_DRIVER=sqlite
+  MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/weighing?charset=utf8mb4&parseTime=false&loc=Local'
   SQLITE_PATH=/var/lib/weighing/go-receiver/receiver.db
   STORE_RAW_RECORDS=true
   STORE_RAW_PAYLOAD=false
@@ -98,7 +100,9 @@ write_env_file() {
     install -d -m 0750 "$DATA_DIR"
 
     local sqlite_path="${SQLITE_PATH:-${DATA_DIR}/receiver.db}"
-    local server_addr="${SERVER_ADDR:-:80}"
+    local server_addr="${SERVER_ADDR:-127.0.0.1:18081}"
+    local db_driver="${DB_DRIVER:-sqlite}"
+    local mysql_dsn="${MYSQL_DSN:-}"
     local store_raw_records="${STORE_RAW_RECORDS:-true}"
     local store_raw_payload="${STORE_RAW_PAYLOAD:-false}"
     local max_body_bytes="${MAX_BODY_BYTES:-67108864}"
@@ -114,7 +118,11 @@ write_env_file() {
     umask 077
     {
         printf 'SERVER_ADDR=%s\n' "$server_addr"
+        printf 'DB_DRIVER=%s\n' "$db_driver"
         printf 'SQLITE_PATH=%s\n' "$sqlite_path"
+        if [[ -n "$mysql_dsn" ]]; then
+            printf 'MYSQL_DSN=%s\n' "$mysql_dsn"
+        fi
         printf 'STORE_RAW_RECORDS=%s\n' "$store_raw_records"
         printf 'STORE_RAW_PAYLOAD=%s\n' "$store_raw_payload"
         printf 'MAX_BODY_BYTES=%s\n' "$max_body_bytes"

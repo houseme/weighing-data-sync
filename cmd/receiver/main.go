@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,12 +37,14 @@ const (
 	defaultLimit        = 100
 	defaultMaxLimit     = 1000
 	defaultSignSkew     = 5 * time.Minute
+	defaultMinDeleteAge = 7 * 24 * time.Hour
 	insertChunkSize     = 500
 )
 
 type config struct {
 	addr             string
-	sqliteDSN        string
+	dbDriver         string
+	dbDSN            string
 	writeAuth        authConfig
 	readAuth         authConfig
 	deleteAuth       authConfig
@@ -55,6 +58,7 @@ type config struct {
 	storeRawRecords  bool
 	storeRawPayload  bool
 	returnRawRecords bool
+	minDeleteAge     time.Duration
 	requireAuth      bool
 }
 
@@ -154,32 +158,38 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", cfg.sqliteDSN)
+	db, err := sql.Open(cfg.dbDriver, cfg.dbDSN)
 	if err != nil {
-		log.Fatalf("open sqlite: %v", err)
+		log.Fatalf("open %s database: %v", cfg.dbDriver, err)
 	}
 	defer db.Close()
 
-	db.SetMaxOpenConns(envInt("SQLITE_MAX_OPEN_CONNS", 1))
-	db.SetMaxIdleConns(envInt("SQLITE_MAX_IDLE_CONNS", 1))
-	db.SetConnMaxLifetime(time.Duration(envInt("SQLITE_CONN_MAX_LIFETIME_SECONDS", 300)) * time.Second)
+	if cfg.dbDriver == "sqlite" {
+		db.SetMaxOpenConns(envInt("SQLITE_MAX_OPEN_CONNS", 1))
+		db.SetMaxIdleConns(envInt("SQLITE_MAX_IDLE_CONNS", 1))
+		db.SetConnMaxLifetime(time.Duration(envInt("SQLITE_CONN_MAX_LIFETIME_SECONDS", 300)) * time.Second)
+	} else {
+		db.SetMaxOpenConns(envInt("MYSQL_MAX_OPEN_CONNS", 10))
+		db.SetMaxIdleConns(envInt("MYSQL_MAX_IDLE_CONNS", 5))
+		db.SetConnMaxLifetime(time.Duration(envInt("MYSQL_CONN_MAX_LIFETIME_SECONDS", 300)) * time.Second)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := db.PingContext(ctx); err != nil {
 		cancel()
-		log.Fatalf("ping sqlite: %v", err)
+		log.Fatalf("ping %s database: %v", cfg.dbDriver, err)
 	}
-	if err := configureSQLite(ctx, db); err != nil {
+	if err := configureDatabase(ctx, cfg.dbDriver, db); err != nil {
 		cancel()
-		log.Fatalf("configure sqlite: %v", err)
+		log.Fatalf("configure %s database: %v", cfg.dbDriver, err)
 	}
 	cancel()
 
 	if cfg.autoMigrate {
 		ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
-		if err := migrate(ctx, db); err != nil {
+		if err := migrate(ctx, cfg.dbDriver, db); err != nil {
 			cancel()
-			log.Fatalf("migrate sqlite: %v", err)
+			log.Fatalf("migrate %s database: %v", cfg.dbDriver, err)
 		}
 		cancel()
 	}
@@ -226,13 +236,14 @@ func main() {
 }
 
 func loadConfig() (config, error) {
-	sqliteDSN, err := loadSQLiteDSN()
+	dbDriver, dbDSN, err := loadDatabase()
 	if err != nil {
 		return config{}, err
 	}
 	cfg := config{
 		addr:             envString("SERVER_ADDR", defaultAddr),
-		sqliteDSN:        sqliteDSN,
+		dbDriver:         dbDriver,
+		dbDSN:            dbDSN,
 		writeAuth:        roleAuth("INGEST", "WRITE"),
 		readAuth:         roleAuth("QUERY", "READ"),
 		deleteAuth:       roleAuth("CLEANUP", "DELETE"),
@@ -246,10 +257,14 @@ func loadConfig() (config, error) {
 		storeRawRecords:  envBool("STORE_RAW_RECORDS", false),
 		storeRawPayload:  envBool("STORE_RAW_PAYLOAD", false),
 		returnRawRecords: envBool("RETURN_RAW_RECORDS", false),
+		minDeleteAge:     time.Duration(envInt("MIN_DELETE_AGE_HOURS", int(defaultMinDeleteAge.Hours()))) * time.Hour,
 		requireAuth:      envBool("REQUIRE_AUTH", true),
 	}
 	if cfg.defaultLimit <= 0 || cfg.maxLimit <= 0 || cfg.defaultLimit > cfg.maxLimit {
 		return cfg, errors.New("invalid query limit settings")
+	}
+	if cfg.minDeleteAge < defaultMinDeleteAge {
+		return cfg, fmt.Errorf("MIN_DELETE_AGE_HOURS must be at least %.0f", defaultMinDeleteAge.Hours())
 	}
 	if cfg.requireAuth {
 		if err := cfg.writeAuth.validate("INGEST"); err != nil {
@@ -290,6 +305,23 @@ func (a authConfig) validate(role string) error {
 	return nil
 }
 
+func loadDatabase() (string, string, error) {
+	driver := strings.ToLower(envString("DB_DRIVER", envString("DATABASE_DRIVER", "sqlite")))
+	switch driver {
+	case "sqlite", "sqlite3":
+		dsn, err := loadSQLiteDSN()
+		return "sqlite", dsn, err
+	case "mysql", "mariadb":
+		dsn := envFirst("MYSQL_DSN", "DATABASE_DSN")
+		if dsn == "" {
+			return "", "", errors.New("MYSQL_DSN or DATABASE_DSN is required when DB_DRIVER=mysql")
+		}
+		return "mysql", dsn, nil
+	default:
+		return "", "", fmt.Errorf("unsupported DB_DRIVER %q", driver)
+	}
+}
+
 func loadSQLiteDSN() (string, error) {
 	if dsn := strings.TrimSpace(os.Getenv("SQLITE_DSN")); dsn != "" {
 		return dsn, nil
@@ -307,7 +339,10 @@ func loadSQLiteDSN() (string, error) {
 	return path, nil
 }
 
-func configureSQLite(ctx context.Context, db *sql.DB) error {
+func configureDatabase(ctx context.Context, driver string, db *sql.DB) error {
+	if driver != "sqlite" {
+		return nil
+	}
 	for _, stmt := range []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
@@ -361,7 +396,7 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request) {
 	accepted, failed, err := s.insertPayload(ctx, requestID, payload, uploadedAt)
 	if err != nil {
 		log.Printf("insert payload failed request_id=%s error=%v", requestID, err)
-		writeError(w, http.StatusInternalServerError, "sqlite write failed")
+		writeError(w, http.StatusInternalServerError, "database write failed")
 		return
 	}
 	acceptedSerials := acceptedWeightInfoSerials(payload, accepted)
@@ -409,7 +444,7 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRecords(r.Context(), filter)
 	if err != nil {
 		log.Printf("query records failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "sqlite query failed")
+		writeError(w, http.StatusInternalServerError, "database query failed")
 		return
 	}
 
@@ -502,20 +537,20 @@ func (s *server) deleteByID(w http.ResponseWriter, r *http.Request, id int64) {
 	deleted, err := s.deleteRecord(r.Context(), "id = ?", id)
 	if err != nil {
 		log.Printf("delete record failed id=%d error=%v", id, err)
-		writeError(w, http.StatusInternalServerError, "sqlite delete failed")
+		writeError(w, http.StatusInternalServerError, "database delete failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "id": id})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "id": id, "min_delete_age_hours": int(s.cfg.minDeleteAge.Hours())})
 }
 
 func (s *server) deleteByKey(w http.ResponseWriter, r *http.Request, key string) {
 	deleted, err := s.deleteRecord(r.Context(), "record_key = ?", key)
 	if err != nil {
 		log.Printf("delete record failed record_key=%s error=%v", key, err)
-		writeError(w, http.StatusInternalServerError, "sqlite delete failed")
+		writeError(w, http.StatusInternalServerError, "database delete failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "record_key": key})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "record_key": key, "min_delete_age_hours": int(s.cfg.minDeleteAge.Hours())})
 }
 
 func (s *server) insertPayload(ctx context.Context, requestID string, payload uploadPayload, uploadedAt *time.Time) ([]string, []string, error) {
@@ -535,17 +570,8 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 		rawPayload = string(encoded)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wds_receive_batches
-			(request_id, source, source_database, source_table, records_count, accepted_count, failed_count, uploaded_at, raw_payload)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
-		ON CONFLICT(request_id) DO UPDATE SET
-			records_count = excluded.records_count,
-			accepted_count = excluded.accepted_count,
-			failed_count = excluded.failed_count,
-			uploaded_at = excluded.uploaded_at,
-			raw_payload = excluded.raw_payload
-	`, requestID, source, database, table, entities.total(), entities.total(), nullableTimeString(uploadedAt), rawPayload); err != nil {
+	receivedAt := timeString(time.Now().UTC())
+	if _, err := tx.ExecContext(ctx, upsertBatchSQL(s.cfg.dbDriver), requestID, source, database, table, entities.total(), entities.total(), nullableTimeString(uploadedAt), receivedAt, rawPayload); err != nil {
 		return nil, nil, err
 	}
 
@@ -557,7 +583,7 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 			if end > len(batch.records) {
 				end = len(batch.records)
 			}
-			chunkAccepted, chunkFailed, err := upsertRecords(ctx, tx, batch.entityType, batch.sourceTable, batch.records[start:end], source, database, uploadedAt, s.cfg.storeRawRecords)
+			chunkAccepted, chunkFailed, err := s.upsertRecords(ctx, tx, batch.entityType, batch.sourceTable, batch.records[start:end], source, database, uploadedAt, s.cfg.storeRawRecords)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -580,7 +606,36 @@ func (s *server) insertPayload(ctx context.Context, requestID string, payload up
 	return accepted, failed, nil
 }
 
-func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, records []map[string]any, source, database string, uploadedAt *time.Time, storeRaw bool) ([]string, []string, error) {
+func upsertBatchSQL(driver string) string {
+	if driver == "mysql" {
+		return `
+		INSERT INTO wds_receive_batches
+			(request_id, source, source_database, source_table, records_count, accepted_count, failed_count, uploaded_at, received_at, raw_payload)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			records_count = VALUES(records_count),
+			accepted_count = VALUES(accepted_count),
+			failed_count = VALUES(failed_count),
+			uploaded_at = VALUES(uploaded_at),
+			received_at = VALUES(received_at),
+			raw_payload = VALUES(raw_payload)
+	`
+	}
+	return `
+		INSERT INTO wds_receive_batches
+			(request_id, source, source_database, source_table, records_count, accepted_count, failed_count, uploaded_at, received_at, raw_payload)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		ON CONFLICT(request_id) DO UPDATE SET
+			records_count = excluded.records_count,
+			accepted_count = excluded.accepted_count,
+			failed_count = excluded.failed_count,
+			uploaded_at = excluded.uploaded_at,
+			received_at = excluded.received_at,
+			raw_payload = excluded.raw_payload
+	`
+}
+
+func (s *server) upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, records []map[string]any, source, database string, uploadedAt *time.Time, storeRaw bool) ([]string, []string, error) {
 	var (
 		values   []string
 		args     []any
@@ -617,7 +672,8 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, re
 			rawRecord = string(encoded)
 		}
 
-		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		now := timeString(time.Now().UTC())
+		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			key,
 			entityType,
@@ -630,6 +686,8 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, re
 			table,
 			nullableTimeString(uploadedAt),
 			rawRecord,
+			now,
+			now,
 		)
 		accepted = append(accepted, key)
 	}
@@ -640,8 +698,32 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, re
 
 	stmt := `
 		INSERT INTO wds_receive_records
-			(record_key, entity_type, key_type, serial_no, plate_no, source_time, source, source_database, source_table, uploaded_at, raw_record)
-		VALUES ` + strings.Join(values, ",") + `
+			(record_key, entity_type, key_type, serial_no, plate_no, source_time, source, source_database, source_table, uploaded_at, raw_record, ingested_at, cloud_updated_at)
+		VALUES ` + strings.Join(values, ",") + upsertRecordSuffixSQL(s.cfg.dbDriver)
+	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+		return nil, nil, err
+	}
+	return accepted, failed, nil
+}
+
+func upsertRecordSuffixSQL(driver string) string {
+	if driver == "mysql" {
+		return `
+		ON DUPLICATE KEY UPDATE
+			entity_type = VALUES(entity_type),
+			key_type = VALUES(key_type),
+			serial_no = VALUES(serial_no),
+			plate_no = VALUES(plate_no),
+			source_time = VALUES(source_time),
+			source = VALUES(source),
+			source_database = VALUES(source_database),
+			source_table = VALUES(source_table),
+			uploaded_at = VALUES(uploaded_at),
+			raw_record = VALUES(raw_record),
+			cloud_updated_at = VALUES(cloud_updated_at)
+	`
+	}
+	return `
 		ON CONFLICT(record_key) DO UPDATE SET
 			entity_type = excluded.entity_type,
 			key_type = excluded.key_type,
@@ -653,12 +735,8 @@ func upsertRecords(ctx context.Context, tx *sql.Tx, entityType, table string, re
 			source_table = excluded.source_table,
 			uploaded_at = excluded.uploaded_at,
 			raw_record = excluded.raw_record,
-			cloud_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			cloud_updated_at = excluded.cloud_updated_at
 	`
-	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
-		return nil, nil, err
-	}
-	return accepted, failed, nil
 }
 
 type queryFilter struct {
@@ -750,7 +828,12 @@ func (s *server) deleteRecord(ctx context.Context, predicate string, arg any) (b
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	result, err := s.db.ExecContext(ctx, "DELETE FROM wds_receive_records WHERE "+predicate, arg)
+	cutoff := time.Now().UTC().Add(-s.cfg.minDeleteAge)
+	result, err := s.db.ExecContext(ctx,
+		"DELETE FROM wds_receive_records WHERE "+predicate+" AND COALESCE(source_time, ingested_at) < ?",
+		arg,
+		timeString(cutoff),
+	)
 	if err != nil {
 		return false, err
 	}
@@ -873,10 +956,10 @@ func readBody(r *http.Request, maxBytes int64) ([]byte, error) {
 	return body, nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
-	for _, stmt := range []string{createRecordsTableSQL, addRecordsEntityTypeColumnSQL, createRecordsEntityTypeIndexSQL, createRecordsPlateTimeIndexSQL, createRecordsSerialNoIndexSQL, createRecordsSourceTimeIndexSQL, createBatchesTableSQL, createBatchesSourceTimeIndexSQL} {
+func migrate(ctx context.Context, driver string, db *sql.DB) error {
+	for _, stmt := range migrationSQL(driver) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			if strings.Contains(err.Error(), "duplicate column name") {
+			if isDuplicateColumnError(err) {
 				continue
 			}
 			return err
@@ -885,7 +968,19 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-const createRecordsTableSQL = `
+func migrationSQL(driver string) []string {
+	if driver == "mysql" {
+		return []string{createRecordsTableMySQL, addRecordsEntityTypeColumnMySQL, createRecordsEntityTypeIndexMySQL, createRecordsPlateTimeIndexMySQL, createRecordsSerialNoIndexMySQL, createRecordsSourceTimeIndexMySQL, createBatchesTableMySQL, createBatchesSourceTimeIndexMySQL}
+	}
+	return []string{createRecordsTableSQLite, addRecordsEntityTypeColumnSQLite, createRecordsEntityTypeIndexSQLite, createRecordsPlateTimeIndexSQLite, createRecordsSerialNoIndexSQLite, createRecordsSourceTimeIndexSQLite, createBatchesTableSQLite, createBatchesSourceTimeIndexSQLite}
+}
+
+func isDuplicateColumnError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "duplicate column") || strings.Contains(msg, "duplicate key name")
+}
+
+const createRecordsTableSQLite = `
 CREATE TABLE IF NOT EXISTS wds_receive_records (
   id integer PRIMARY KEY AUTOINCREMENT CHECK (id >= 0),
   record_key text NOT NULL,
@@ -905,32 +1000,32 @@ CREATE TABLE IF NOT EXISTS wds_receive_records (
 )
 `
 
-const addRecordsEntityTypeColumnSQL = `
+const addRecordsEntityTypeColumnSQLite = `
 ALTER TABLE wds_receive_records
 ADD COLUMN entity_type text NOT NULL DEFAULT 'weight_info'
 `
 
-const createRecordsEntityTypeIndexSQL = `
+const createRecordsEntityTypeIndexSQLite = `
 CREATE INDEX IF NOT EXISTS idx_wds_receive_entity_type
 ON wds_receive_records (entity_type, ingested_at, record_key)
 `
 
-const createRecordsPlateTimeIndexSQL = `
+const createRecordsPlateTimeIndexSQLite = `
 CREATE INDEX IF NOT EXISTS idx_wds_receive_plate_time
 ON wds_receive_records (plate_no, source_time, record_key)
 `
 
-const createRecordsSerialNoIndexSQL = `
+const createRecordsSerialNoIndexSQLite = `
 CREATE INDEX IF NOT EXISTS idx_wds_receive_serial_no
 ON wds_receive_records (serial_no)
 `
 
-const createRecordsSourceTimeIndexSQL = `
+const createRecordsSourceTimeIndexSQLite = `
 CREATE INDEX IF NOT EXISTS idx_wds_receive_source_time
 ON wds_receive_records (source_database, source_table, source_time, record_key)
 `
 
-const createBatchesTableSQL = `
+const createBatchesTableSQLite = `
 CREATE TABLE IF NOT EXISTS wds_receive_batches (
   id integer PRIMARY KEY AUTOINCREMENT CHECK (id >= 0),
   request_id text NOT NULL,
@@ -947,8 +1042,77 @@ CREATE TABLE IF NOT EXISTS wds_receive_batches (
 )
 `
 
-const createBatchesSourceTimeIndexSQL = `
+const createBatchesSourceTimeIndexSQLite = `
 CREATE INDEX IF NOT EXISTS idx_wds_receive_batch_source_time
+ON wds_receive_batches (source_database, source_table, received_at)
+`
+
+const createRecordsTableMySQL = `
+CREATE TABLE IF NOT EXISTS wds_receive_records (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  record_key VARCHAR(191) NOT NULL,
+  entity_type VARCHAR(32) NOT NULL DEFAULT 'weight_info',
+  key_type VARCHAR(64) NOT NULL,
+  serial_no VARCHAR(191) NULL,
+  plate_no VARCHAR(191) NULL,
+  source_time VARCHAR(64) NULL,
+  source VARCHAR(191) NOT NULL DEFAULT 'unknown',
+  source_database VARCHAR(191) NOT NULL DEFAULT 'unknown',
+  source_table VARCHAR(191) NOT NULL DEFAULT 'unknown',
+  uploaded_at VARCHAR(64) NULL,
+  raw_record LONGTEXT NULL,
+  ingested_at VARCHAR(64) NOT NULL,
+  cloud_updated_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_wds_receive_record_key (record_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`
+
+const addRecordsEntityTypeColumnMySQL = `
+ALTER TABLE wds_receive_records
+ADD COLUMN entity_type VARCHAR(32) NOT NULL DEFAULT 'weight_info' AFTER record_key
+`
+
+const createRecordsEntityTypeIndexMySQL = `
+CREATE INDEX idx_wds_receive_entity_type
+ON wds_receive_records (entity_type, ingested_at, record_key)
+`
+
+const createRecordsPlateTimeIndexMySQL = `
+CREATE INDEX idx_wds_receive_plate_time
+ON wds_receive_records (plate_no, source_time, record_key)
+`
+
+const createRecordsSerialNoIndexMySQL = `
+CREATE INDEX idx_wds_receive_serial_no
+ON wds_receive_records (serial_no)
+`
+
+const createRecordsSourceTimeIndexMySQL = `
+CREATE INDEX idx_wds_receive_source_time
+ON wds_receive_records (source_database, source_table, source_time, record_key)
+`
+
+const createBatchesTableMySQL = `
+CREATE TABLE IF NOT EXISTS wds_receive_batches (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  request_id VARCHAR(64) NOT NULL,
+  source VARCHAR(191) NOT NULL,
+  source_database VARCHAR(191) NOT NULL,
+  source_table VARCHAR(191) NOT NULL,
+  records_count INT NOT NULL,
+  accepted_count INT NOT NULL DEFAULT 0,
+  failed_count INT NOT NULL DEFAULT 0,
+  uploaded_at VARCHAR(64) NULL,
+  received_at VARCHAR(64) NOT NULL,
+  raw_payload LONGTEXT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_wds_receive_request_id (request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`
+
+const createBatchesSourceTimeIndexMySQL = `
+CREATE INDEX idx_wds_receive_batch_source_time
 ON wds_receive_batches (source_database, source_table, received_at)
 `
 

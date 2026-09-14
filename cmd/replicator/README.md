@@ -1,6 +1,6 @@
 # B Replicator
 
-`b-replicator` is the standalone Go program for the B Windows machine. It fetches raw records from C, writes them idempotently to local MySQL, then deletes C records through a separate asynchronous worker.
+`b-replicator` is the standalone Go program for the B Windows machine. It fetches raw records from C and writes them idempotently to local MySQL. It can also run in print-only mode to inspect C data without writing MySQL or deleting anything.
 
 Canonical Go module path: `github.com/houseme/weighing-data-sync/replicator`. The repository directory is `cmd/replicator`; the Windows executable keeps the `b-replicator` name.
 
@@ -8,7 +8,7 @@ It uses the pure-Go `github.com/go-sql-driver/mysql` driver and the standard-lib
 
 ## Delivery guarantee
 
-The raw-record upsert, typed business-table upsert, and insert into `wds_c_delete_queue` share one MySQL transaction. A crash before commit leaves neither durable; a crash after commit leaves a durable cleanup job. Re-fetching is safe because `record_key` is unique in all replicated tables. Delete failures retry with exponential backoff from 1 to 128 seconds.
+The raw-record upsert and typed business-table upsert share one MySQL transaction. A crash before commit leaves neither durable. Re-fetching is safe because `record_key` is unique in all replicated tables. C cleanup is disabled by default; set `ENABLE_CLEANUP=true` only when you intentionally want the old asynchronous cleanup worker.
 
 ## Run
 
@@ -20,6 +20,17 @@ $env:QUERY_API_TOKEN = 'b-read-token'
 $env:QUERY_SIGN_SECRET = 'b-read-sign-secret'
 $env:CLEANUP_API_TOKEN = 'b-delete-token'
 $env:CLEANUP_SIGN_SECRET = 'b-delete-sign-secret'
+go run .
+```
+
+Print remote C data once without MySQL:
+
+```powershell
+$env:C_BASE_URL = 'http://c-server'
+$env:QUERY_API_TOKEN = 'b-read-token'
+$env:QUERY_SIGN_SECRET = 'b-read-sign-secret'
+$env:PRINT_ONLY = 'true'
+$env:RUN_ONCE = 'true'
 go run .
 ```
 
@@ -38,7 +49,10 @@ go build -o bin\b-replicator.exe .
 | `C_QUERY_ROUTE` | `/weighing-data-sync/records` | C GET route |
 | `C_CLEANUP_ROUTE` | `/weighing-data-sync/records` | C DELETE route; B appends the C id |
 | `QUERY_API_TOKEN` / `QUERY_SIGN_SECRET` | required | C query credentials |
-| `CLEANUP_API_TOKEN` / `CLEANUP_SIGN_SECRET` | required | C cleanup credentials |
+| `CLEANUP_API_TOKEN` / `CLEANUP_SIGN_SECRET` | required only when `ENABLE_CLEANUP=true` | C cleanup credentials |
+| `PRINT_ONLY` | `false` | Query C once and print the JSON response without opening MySQL |
+| `RUN_ONCE` | `false` | Run one fetch/store pass and exit; implied by `PRINT_ONLY` behavior |
+| `ENABLE_CLEANUP` | `false` | Enable the asynchronous C cleanup worker |
 | `FETCH_BATCH_SIZE` | `100` | C records per fetch/delete pass |
 | `FETCH_INTERVAL_SECONDS` | `5` | Delay between fetch passes |
 | `DELETE_INTERVAL_SECONDS` | `2` | Delay between cleanup passes |
@@ -66,4 +80,4 @@ Query values are sorted and URL-escaped; `signature` and `sign` are excluded. GE
 - `wds_replicated_records` contains the full raw record JSON, keyed by `record_key`, with `entity_type` identifying `weight_info` or `weight_photo`.
 - `wds_weight_info_records` contains the fields from `tbl_weightInfo`, including serial number, plate number, goods, weight values, fee/amount fields, timestamps, backup fields, finish/cancel/delete flags, and raw JSON.
 - `wds_weight_photo_records` contains the fields from `tbl_weightPhoto`, including source image id, `serialNo`, base64 `captureImage`, plate number, image type, upload/delete flags, client id, consignee unit, forwarding unit, and raw JSON.
-- `wds_c_delete_queue` is the durable cleanup outbox. Rows with `status='failed'` retain the latest error and are retried automatically.
+- `wds_c_delete_queue` is used only when `ENABLE_CLEANUP=true`. Rows with `status='failed'` retain the latest error and are retried automatically.

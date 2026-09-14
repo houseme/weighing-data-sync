@@ -44,6 +44,9 @@ type config struct {
 	httpTimeout    time.Duration
 	dbTimeout      time.Duration
 	autoMigrate    bool
+	cleanupEnabled bool
+	printOnly      bool
+	runOnce        bool
 }
 type authConfig struct{ token, secret string }
 type app struct {
@@ -80,6 +83,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("config error: %v", err)
 	}
+	if cfg.printOnly {
+		a := &app{cfg: cfg, client: &http.Client{Timeout: cfg.httpTimeout}}
+		if err := a.fetchAndPrint(context.Background()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	db, err := sql.Open("mysql", cfg.mysqlDSN)
 	if err != nil {
 		log.Fatalf("open mysql: %v", err)
@@ -101,10 +111,18 @@ func main() {
 	}
 	cancel()
 	a := &app{cfg: cfg, db: db, client: &http.Client{Timeout: cfg.httpTimeout}}
+	if cfg.runOnce {
+		if err := a.fetchAndStore(context.Background()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go a.fetchLoop(ctx)
-	go a.deleteLoop(ctx)
+	if cfg.cleanupEnabled {
+		go a.deleteLoop(ctx)
+	}
 	log.Printf("b replicator started: c=%s query=%s mysql connected", cfg.cBaseURL, cfg.queryRoute)
 	<-ctx.Done()
 	log.Printf("b replicator stopped")
@@ -119,8 +137,8 @@ func loadConfig() (config, error) {
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return config{}, errors.New("C_BASE_URL must be an absolute HTTP URL")
 	}
-	cfg := config{mysqlDSN: strings.TrimSpace(os.Getenv("MYSQL_DSN")), cBaseURL: base, queryRoute: envString("C_QUERY_ROUTE", defaultQueryRoute), cleanupRoute: envString("C_CLEANUP_ROUTE", defaultCleanupRoute), queryAuth: authConfig{envString("QUERY_API_TOKEN", ""), envString("QUERY_SIGN_SECRET", "")}, cleanupAuth: authConfig{envString("CLEANUP_API_TOKEN", ""), envString("CLEANUP_SIGN_SECRET", "")}, batchSize: envInt("FETCH_BATCH_SIZE", 100), fetchInterval: envDurationSeconds("FETCH_INTERVAL_SECONDS", 5), deleteInterval: envDurationSeconds("DELETE_INTERVAL_SECONDS", 2), httpTimeout: envDurationSeconds("HTTP_TIMEOUT_SECONDS", 30), dbTimeout: envDurationSeconds("DB_TIMEOUT_SECONDS", 30), autoMigrate: envBool("AUTO_MIGRATE", true)}
-	if cfg.mysqlDSN == "" {
+	cfg := config{mysqlDSN: strings.TrimSpace(os.Getenv("MYSQL_DSN")), cBaseURL: base, queryRoute: envString("C_QUERY_ROUTE", defaultQueryRoute), cleanupRoute: envString("C_CLEANUP_ROUTE", defaultCleanupRoute), queryAuth: authConfig{envString("QUERY_API_TOKEN", ""), envString("QUERY_SIGN_SECRET", "")}, cleanupAuth: authConfig{envString("CLEANUP_API_TOKEN", ""), envString("CLEANUP_SIGN_SECRET", "")}, batchSize: envInt("FETCH_BATCH_SIZE", 100), fetchInterval: envDurationSeconds("FETCH_INTERVAL_SECONDS", 5), deleteInterval: envDurationSeconds("DELETE_INTERVAL_SECONDS", 2), httpTimeout: envDurationSeconds("HTTP_TIMEOUT_SECONDS", 30), dbTimeout: envDurationSeconds("DB_TIMEOUT_SECONDS", 30), autoMigrate: envBool("AUTO_MIGRATE", true), cleanupEnabled: envBool("ENABLE_CLEANUP", false), printOnly: envBool("PRINT_ONLY", false), runOnce: envBool("RUN_ONCE", false)}
+	if cfg.mysqlDSN == "" && !cfg.printOnly {
 		return cfg, errors.New("MYSQL_DSN is required")
 	}
 	if err := validateRoute("C_QUERY_ROUTE", cfg.queryRoute); err != nil {
@@ -132,7 +150,7 @@ func loadConfig() (config, error) {
 	if cfg.queryAuth.token == "" || cfg.queryAuth.secret == "" {
 		return cfg, errors.New("QUERY_API_TOKEN and QUERY_SIGN_SECRET are required")
 	}
-	if cfg.cleanupAuth.token == "" || cfg.cleanupAuth.secret == "" {
+	if cfg.cleanupEnabled && (cfg.cleanupAuth.token == "" || cfg.cleanupAuth.secret == "") {
 		return cfg, errors.New("CLEANUP_API_TOKEN and CLEANUP_SIGN_SECRET are required")
 	}
 	if cfg.batchSize < 1 || cfg.fetchInterval <= 0 || cfg.deleteInterval <= 0 || cfg.httpTimeout <= 0 || cfg.dbTimeout <= 0 {
@@ -186,7 +204,11 @@ func (a *app) fetchAndStore(ctx context.Context) error {
 			return fmt.Errorf("store C record %q: %w", record.RecordKey, err)
 		}
 	}
-	log.Printf("stored %d record(s) and queued cleanup", len(response.Records))
+	if a.cfg.cleanupEnabled {
+		log.Printf("stored %d record(s) and queued cleanup", len(response.Records))
+	} else {
+		log.Printf("stored %d record(s); cleanup disabled", len(response.Records))
+	}
 	return nil
 }
 
@@ -209,11 +231,31 @@ func (a *app) storeRecord(parent context.Context, r cRecord) error {
 	if err := upsertBusinessRecord(ctx, tx, entityType, r); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO wds_c_delete_queue (c_record_id,record_key,status,retry_count,next_attempt_at,last_error) VALUES (?, ?, 'pending', 0, UTC_TIMESTAMP(6), NULL) ON DUPLICATE KEY UPDATE c_record_id=VALUES(c_record_id),status='pending',retry_count=0,next_attempt_at=UTC_TIMESTAMP(6),last_error=NULL,updated_at=UTC_TIMESTAMP(6)`, r.ID, r.RecordKey)
+	if a.cfg.cleanupEnabled {
+		_, err = tx.ExecContext(ctx, `INSERT INTO wds_c_delete_queue (c_record_id,record_key,status,retry_count,next_attempt_at,last_error) VALUES (?, ?, 'pending', 0, UTC_TIMESTAMP(6), NULL) ON DUPLICATE KEY UPDATE c_record_id=VALUES(c_record_id),status='pending',retry_count=0,next_attempt_at=UTC_TIMESTAMP(6),last_error=NULL,updated_at=UTC_TIMESTAMP(6)`, r.ID, r.RecordKey)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *app) fetchAndPrint(ctx context.Context) error {
+	endpoint := a.endpoint(a.cfg.queryRoute)
+	q := endpoint.Query()
+	q.Set("include_raw", "true")
+	q.Set("limit", strconv.Itoa(a.cfg.batchSize))
+	endpoint.RawQuery = q.Encode()
+	var response queryResponse
+	if err := a.doJSON(ctx, http.MethodGet, endpoint, a.cfg.queryAuth, &response); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func (a *app) deletePending(ctx context.Context) error {
